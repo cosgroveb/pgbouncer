@@ -26,6 +26,7 @@
 
 #include "bouncer.h"
 
+#include <usual/tls/tls_internal.h>
 #include <usual/safeio.h>
 #include <usual/slab.h>
 #include <usual/mbuf.h>
@@ -1235,6 +1236,38 @@ static bool setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
 	return true;
 }
 
+static bool skip_tag_pools_dirty(struct tls_config new_server_connect_conf)
+{
+  if (server_connect_conf == NULL) {
+    log_debug("no existing server ssl config detected. marking pools dirty.");
+    return false;
+  }
+  else if (
+      strings_equal(new_server_connect_conf.ca_file, server_connect_conf->ca_file) &&
+      strings_equal(new_server_connect_conf.ca_path, server_connect_conf->ca_path) &&
+      strings_equal(new_server_connect_conf.ca_mem, server_connect_conf->ca_mem) &&
+      (new_server_connect_conf.ca_len == server_connect_conf->ca_len) &&
+      strings_equal(new_server_connect_conf.ciphers, server_connect_conf->ciphers) &&
+      (new_server_connect_conf.ciphers_server == server_connect_conf->ciphers_server) &&
+      (new_server_connect_conf.dheparams == server_connect_conf->dheparams) &&
+      (new_server_connect_conf.ecdhecurve == server_connect_conf->ecdhecurve) &&
+      strings_equal(new_server_connect_conf.ocsp_file, server_connect_conf->ocsp_file) &&
+      strings_equal(new_server_connect_conf.ocsp_mem, server_connect_conf->ocsp_mem) &&
+      (new_server_connect_conf.ocsp_len == server_connect_conf->ocsp_len) &&
+      (new_server_connect_conf.protocols == server_connect_conf->protocols) &&
+      (new_server_connect_conf.verify_cert == server_connect_conf->verify_cert) &&
+      (new_server_connect_conf.verify_client == server_connect_conf->verify_client) &&
+      (new_server_connect_conf.verify_depth == server_connect_conf->verify_depth) &&
+      (new_server_connect_conf.verify_name == server_connect_conf->verify_name) &&
+      (new_server_connect_conf.verify_time == server_connect_conf->verify_time)) {
+    log_debug("no server ssl config change detected. not marking pools dirty.");
+    return true;
+  } else {
+    log_debug("server ssl config change detected. marking pools dirty.");
+    return false;
+  }
+}
+
 bool sbuf_tls_setup(void)
 {
 	int err;
@@ -1323,7 +1356,7 @@ bool sbuf_tls_setup(void)
 	 * connections to be on the safe side, even though it's possible nothing
 	 * has changed.
 	 */
-	if (server_connect_conf || new_server_connect_conf) {
+	if ((server_connect_conf || new_server_connect_conf) && ((cf_client_tls_sslmode != SSLMODE_DISABLED) && !skip_tag_pools_dirty(new_server_connect_conf[0]))) {
 		struct List *item;
 		PgPool *pool;
 		statlist_for_each(item, &pool_list) {
