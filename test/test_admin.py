@@ -93,3 +93,15 @@ def test_show_stats(bouncer):
     assert ("total_xact_count", 10) in totals
     # 11 SELECT 1 + 2 times COMMIT and ROLLBACK + 4 admin commands
     assert ("total_query_count", 19) in totals
+
+def test_show_users(bouncer):
+    bouncer.admin("SHOW VERSION")
+    with bouncer.cur(dbname="db1", user="puser1") as cur_puser1:
+        cur_puser1.execute("SELECT current_user")
+        assert cur_puser1.fetchone()[0] == "puser2"
+        print(bouncer.admin("SHOW USERS"))
+
+
+        assert 2 == 1
+
+
