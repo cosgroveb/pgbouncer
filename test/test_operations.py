@@ -121,24 +121,32 @@ def test_servers_disconnect_when_enabling_ssl(bouncer):
     with bouncer.cur() as cur:
         bouncer.write_ini(f"server_tls_sslmode = allow")
         bouncer.admin("RELOAD")
-        # assert server_tls_sslmode = allow
 
         with bouncer.log_contains(r'pTxnPool.*closing because: database configuration changed', 1):
             # keep cursor open for > full_maint_period
             # full_maint_period = 3x/s https://github.com/pgbouncer/pgbouncer/blob/master/src/janitor.c#L28
             time.sleep(0.5)
 
-def test_servers_disconnect_when_changing_ssl(bouncer):
+def test_servers_disconnect_when_changing_sslmode(bouncer):
     bouncer.default_db = "pTxnPool"
-    # assert server_tls_sslmode = prefer
 
     with bouncer.cur() as cur:
         bouncer.write_ini(f"server_tls_sslmode = allow")
         bouncer.admin("RELOAD")
 
         with bouncer.log_contains(r'pTxnPool.*closing because: database configuration changed'):
-            # keep cursor open for > full_maint_period
-            # full_maint_period = 3x/s https://github.com/pgbouncer/pgbouncer/blob/master/src/janitor.c#L28
+            time.sleep(0.5)
+
+def test_servers_disconnect_when_changing_tls_protocols(bouncer):
+    bouncer.default_db = "pTxnPool"
+    bouncer.write_ini(f"server_tls_protocols = legacy")
+    bouncer.admin("RELOAD")
+
+    with bouncer.cur() as cur:
+        bouncer.write_ini(f"server_tls_protocols = secure")
+        bouncer.admin("RELOAD")
+
+        with bouncer.log_contains(r'pTxnPool.*closing because: database configuration changed'):
             time.sleep(0.5)
 
 def test_reconnect(bouncer):
