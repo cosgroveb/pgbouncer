@@ -139,7 +139,7 @@ def test_servers_disconnect_when_changing_sslmode(bouncer):
 
 def test_servers_disconnect_when_changing_tls_protocols(bouncer):
     bouncer.default_db = "pTxnPool"
-    bouncer.write_ini(f"server_tls_protocols = legacy")
+    bouncer.write_ini(f"server_tls_protocols = tlsv1.0")
     bouncer.admin("RELOAD")
 
     with bouncer.cur() as cur:
