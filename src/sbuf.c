@@ -1260,17 +1260,17 @@ static bool tls_config_changed(struct tls_config *new_server_connect_conf)
 static bool skip_tag_pools_dirty(struct tls_config *new_server_connect_conf)
 {
   if (server_connect_sslmode != cf_server_tls_sslmode) {
-    log_debug("new server_tls_sslmode detected. marking pools dirty.");
+    log_noise("new server_tls_sslmode detected");
     return false;
   } else if (server_connect_conf == NULL) {
-    log_debug("no existing server ssl config detected. marking pools dirty.");
+    log_noise("no existing server tls config detected");
     return false;
   }
   else if (tls_config_changed(new_server_connect_conf)) {
-    log_debug("no server ssl config change detected. not marking pools dirty.");
+    log_noise("no server tls config change detected");
     return true;
   } else {
-    log_debug("server ssl config change detected. marking pools dirty.");
+    log_noise("server tls config change detected");
     return false;
   }
 }
@@ -1359,10 +1359,7 @@ bool sbuf_tls_setup(void)
 	 * old TLS settings, possibly less secure, could be used for old
 	 * connections indefinitely. If TLS is disabled, and it was disabled before
 	 * as well then recycling connections is not necessary, since we know none
-	 * of the settings have changed. In all other cases we recycle the
-	 * connections to be on the safe side, even though it's possible nothing
-	 * has changed.
-	 */
+	 * of the settings have changed. */
 	if ((server_connect_conf || new_server_connect_conf) && !skip_tag_pools_dirty(new_server_connect_conf)) {
 		struct List *item;
 		PgPool *pool;
