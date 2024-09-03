@@ -435,3 +435,25 @@ def test_servers_disconnect_when_changing_sslmode(bouncer):
         ):
             time.sleep(0.5)
             cur.execute("SELECT 1")
+
+def test_servers_disconnect_when_changing_host_no_ssl(bouncer):
+    bouncer.default_db = "pTxnPool"
+    bouncer.write_ini(f"server_tls_sslmode = disable")
+    bouncer.admin("RELOAD")
+
+    with bouncer.ini_path.open() as f:
+        original = f.read()
+    with bouncer.ini_path.open("w") as f:
+        # change a backend db config
+        print(original.replace("host=127.0.0.1", "host=localhost"))
+        f.write(original.replace("host=127.0.0.1", "host=localhost"))
+
+    with bouncer.cur() as cur:
+        # do nothing and leave ssl disabled
+        bouncer.admin("RELOAD")
+
+        with bouncer.log_contains(
+            r"pTxnPool.*closing because: database configuration changed"
+        ):
+            time.sleep(0.5)
+            cur.execute("SELECT 1")
