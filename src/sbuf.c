@@ -1236,6 +1236,37 @@ static bool setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
 	return true;
 }
 
+static bool tls_config_keypair_unchanged(struct tls_keypair *new_server_keypair, struct tls_keypair *server_keypair)
+{
+	return (strings_equal(new_server_keypair->cert_file, server_keypair->cert_file) &&
+		memcmp(new_server_keypair->cert_mem, server_keypair->cert_mem, new_server_keypair->cert_len) == 0 &&
+		strings_equal(new_server_keypair->key_file, server_keypair->key_file) &&
+		memcmp(new_server_keypair->key_mem, server_keypair->key_mem, new_server_keypair->key_len) == 0);
+}
+
+static bool tls_config_keypairs_unchanged(struct tls_keypair *new_server_keypair, struct tls_keypair *server_keypair)
+{
+	bool keypair_unchanged;
+	struct tls_keypair *new_kp, *next_new_kp, *server_kp, *next_server_kp;
+
+	keypair_unchanged = tls_config_keypair_unchanged(new_server_keypair, server_keypair);
+
+	if (keypair_unchanged == false) {
+		return false;
+	}
+
+	for (new_kp = new_server_keypair; new_kp != NULL; new_kp = next_new_kp) {
+		next_new_kp = new_kp->next;
+		for (server_kp = server_keypair; server_kp != NULL; server_kp = next_server_kp) {
+			next_server_kp = server_kp->next;
+
+			keypair_unchanged = tls_config_keypair_unchanged(new_kp, server_kp);
+		}
+	}
+
+	return keypair_unchanged;
+}
+
 static bool tls_config_unchanged(struct tls_config *new_server_connect_conf)
 {
 	return (strings_equal(new_server_connect_conf->ca_file, server_connect_conf->ca_file) &&
@@ -1245,6 +1276,7 @@ static bool tls_config_unchanged(struct tls_config *new_server_connect_conf)
 		(new_server_connect_conf->ciphers_server == server_connect_conf->ciphers_server) &&
 		(new_server_connect_conf->dheparams == server_connect_conf->dheparams) &&
 		(new_server_connect_conf->ecdhecurve == server_connect_conf->ecdhecurve) &&
+		tls_config_keypairs_unchanged(new_server_connect_conf->keypair, server_connect_conf->keypair) &&
 		strings_equal(new_server_connect_conf->ocsp_file, server_connect_conf->ocsp_file) &&
 		memcmp(new_server_connect_conf->ocsp_mem, server_connect_conf->ocsp_mem, new_server_connect_conf->ocsp_len) == 0 &&
 		(new_server_connect_conf->protocols == server_connect_conf->protocols) &&

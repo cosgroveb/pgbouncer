@@ -435,3 +435,26 @@ def test_servers_disconnect_when_changing_sslmode(bouncer, pg, cert_dir):
         with bouncer.log_contains(r"closing because: obsolete connection"):
             bouncer.admin("RELOAD")
             cur.execute("SELECT 1")
+
+
+def test_server_disconnects_when_ssl_change_ca(bouncer, cert_dir):
+    bouncer.default_db = "pTxnPool"
+
+    root = cert_dir / "TestCA1" / "ca.crt"
+    key = cert_dir / "TestCA1" / "sites" / "01-localhost.key"
+    cert = cert_dir / "TestCA1" / "sites" / "01-localhost.crt"
+    bouncer.write_ini(f"client_tls_key_file = {key}")
+    bouncer.write_ini(f"client_tls_cert_file = {cert}")
+    bouncer.write_ini(f"client_tls_ca_file = {root}")
+    bouncer.write_ini(f"client_tls_sslmode = require")
+    bouncer.admin("RELOAD")
+
+    with bouncer.cur() as cur:
+        new_root = cert_dir / "TestCA2" / "ca.crt"
+        new_key = cert_dir / "TestCA2" / "sites" / "01-localhost.key"
+        new_cert = cert_dir / "TestCA2" / "sites" / "01-localhost.crt"
+        bouncer.write_ini(f"client_tls_key_file = {new_key}")
+        bouncer.write_ini(f"client_tls_cert_file = {new_cert}")
+        bouncer.write_ini(f"client_tls_ca_file = {new_root}")
+        with bouncer.log_contains(r"closing because: obsolete connection"):
+            bouncer.admin("RELOAD")
