@@ -714,6 +714,7 @@ class Postgres(QueryRunner):
             # Make PostgreSQL listen on both IPv4 and IPv6 (if supported)
             if HAVE_IPV6_LOCALHOST:
                 pgconf.write("listen_addresses='127.0.0.1,::1'\n")
+            pgconf.write("listen_addresses='*'\n")
 
     def pgctl(self, command, **kwargs):
         run(f"pg_ctl -w --pgdata {self.pgdata} {command}", **kwargs)
@@ -832,6 +833,7 @@ class Postgres(QueryRunner):
         NOTE: after configuring a call to reload or restart is needed for the
         settings to become effective.
         """
+        print(f"alter system set {config}")
         self.sql(f"alter system set {config}")
 
     @contextmanager
@@ -1168,3 +1170,27 @@ class Bouncer(QueryRunner):
             with self.ini_path.open("w") as f:
                 f.write(config_old)
             self.admin("RELOAD")
+
+    @contextmanager
+    def run_with_appended_etc_hosts(self, hosts):
+        """Provide additional entries for /etc/hosts and restore the
+        previous file after execution
+
+        hosts:
+            additional /etc/hosts entries separated by newlines
+        """
+        backslash = "\\"
+        hosts_filename = "/etc/hosts"
+        hosts_backup_filename = "/etc/hosts.bak"
+
+        sudo(f"cp {hosts_filename} {hosts_backup_filename}")
+        sudo(
+            'bash -c "'
+            f"echo '{hosts}' >> {hosts_filename}"
+            f'"'
+        )
+        try:
+            yield self
+        finally:
+                sudo(f"cp {hosts_backup_filename} {hosts_filename}")
+                sudo(f"rm {hosts_backup_filename}")
