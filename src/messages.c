@@ -64,6 +64,22 @@ PreparedStatementAction inspect_describe_or_close_packet(PgSocket *client, PktHd
 	return PS_HANDLE;
 }
 
+void conditionally_coerce_set_statements(PgSocket *client, PktHdr *pkt)
+{
+	const char *statement;
+
+	slog_info(client, "pool_mode: %d", client->db->pool_mode);
+
+	if (!mbuf_get_string(&pkt->data, &statement))
+		goto failed;
+	if ((strstr(statement, "SET") != NULL) && (strstr(statement, "SET LOCAL") == NULL))
+		return true;
+	return false;
+failed:
+	disconnect_client(client, true, "broken Query packet");
+	return false;
+}
+
 /*
  * Unmarshall Parse packet into PgParsePacket struct for further processing.
  *

@@ -1249,6 +1249,11 @@ static bool handle_client_work(PgSocket *client, PktHdr *pkt)
 			disconnect_client(client, true, "PQexec disallowed");
 			return false;
 		}
+		slog_info(client, "got here?");
+		if(!client->pool->db->admin && lient->db->pool_mode == POOL_TX) {
+			conditionally_coerce_set_statements(client, pkt);
+		}
+
 		track_outstanding = true;
 		break;
 	case 'F':		/* FunctionCall */
