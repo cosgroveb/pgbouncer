@@ -735,7 +735,13 @@ class Postgres(QueryRunner):
         )
 
     def start(self):
+        if re.search("^127\.0\.0\.1$", self.host) and HAVE_IPV6_LOCALHOST:
+            host = self.host + ",::1"
+        else:
+            host = self.host
         try:
+            print(f"\n\nself.host: {self.host}\n")
+            print("\n\nPG_LOG\n")
             self.pgctl(
                 f"-o \" -k '' -h {self.host} -p {self.port}\" -l {self.log_path} start"
             )
