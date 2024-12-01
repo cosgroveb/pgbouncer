@@ -187,11 +187,9 @@ def replica(pg, tmp_path_factory):
     replica.init_from(pg)
     replica.start()
 
-    try:
-        yield replica
+    yield replica
 
-    finally:
-        replica.cleanup()
+    replica.cleanup()
 
 
 @pytest.mark.asyncio
