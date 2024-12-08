@@ -1,6 +1,7 @@
 import os
 import platform
 import shutil
+import sys
 
 import filelock
 import pytest
@@ -186,6 +187,10 @@ def replica(pg, tmp_path_factory):
     replica.host = "127.0.0.2"
     replica.port = pg.port
     replica.init_from(pg)
+
+    print("DEBUGGING")
+    print(replica.pgdata, file=sys.stdout)
+
     replica.start()
 
     yield replica
