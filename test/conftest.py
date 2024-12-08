@@ -186,6 +186,9 @@ def replica(pg, tmp_path_factory):
     replica.host = "127.0.0.2"
     replica.port = pg.port
     replica.init_from(pg)
+
+    replica.pgdata.mkdir
+
     replica.start()
 
     yield replica
