@@ -1,7 +1,7 @@
 import psycopg
 import pytest
 
-from .utils import MACOS, PG_MAJOR_VERSION, USE_SUDO, Bouncer
+from .utils import MACOS, PG_MAJOR_VERSION, USE_SUDO, Bouncer, eprint
 
 if PG_MAJOR_VERSION < 14:
     pytest.skip(
@@ -50,15 +50,28 @@ def test_target_session_attrs_standby_second(bouncer, replica):
         bouncer.test(dbname="standby_second")
 
 
-def test_target_session_attrs_readonly_first(bouncer, replica):
+def test_target_session_attrs_readonly_hot_standby_first(bouncer, replica):
     with bouncer.log_contains(r"127.0.0.2:\d+ new connection to server", 1):
         bouncer.test(dbname="readonly_first")
 
 
-def test_target_session_attrs_readonly_second(bouncer, replica):
+def test_target_session_attrs_readonly_hot_standby_second(bouncer, replica):
     with bouncer.log_contains(
         r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
         1,
+    ):
+        bouncer.test(dbname="readonly_second")
+
+
+def test_target_session_attrs_readonly_primary_in_transaction_read_only_first(pg, bouncer, replica):
+    eprint("%%%%%%%%%%%%%%%%%%%%%%")
+    eprint(pg.sql_value("select pg_is_in_recovery()"))
+    eprint("%%%%%%%%%%%%%%%%%%%%%%")
+    eprint(pg.sql_value("select pg_is_in_recovery()"))
+    bouncer.pg.configure("transaction_read_only=on")
+    with bouncer.log_contains(
+        r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
+        times=0,
     ):
         bouncer.test(dbname="readonly_second")
 
