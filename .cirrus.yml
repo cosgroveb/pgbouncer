@@ -266,5 +266,6 @@ task:
   build_script:
     - touch config.mak # Fake that configure has run
   test_script:
+    - sleep 100000
     - make format-check
     - make lint
