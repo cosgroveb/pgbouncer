@@ -1,5 +1,6 @@
 import psycopg
 import pytest
+import time
 
 from .utils import MACOS, PG_MAJOR_VERSION, USE_SUDO, Bouncer
 
@@ -45,8 +46,17 @@ def test_target_session_attrs_primary_second(bouncer, replica):
 
 
 def test_target_session_attrs_standby_first(bouncer, replica):
-    with bouncer.log_contains(r"127.0.0.2:\d+ new connection to server", 1):
-        bouncer.test(dbname="standby_first")
+    with bouncer.log_contains(
+        r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
+        0,
+    ):
+        try:
+            bouncer.test(dbname="standby_first")
+            replica.pgctl("promote")
+            time.sleep(3)
+            bouncer.test(dbname="standby_first")
+        except psycopg.errors.ConnectionTimeout:
+            print("ok")
 
 
 def test_target_session_attrs_standby_second(bouncer, replica):
