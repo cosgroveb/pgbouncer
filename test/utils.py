@@ -143,9 +143,10 @@ PG_MAJOR_VERSION = get_pg_major_version()
 
 def get_max_password_length():
     with open("../include/bouncer.h", encoding="utf-8") as f:
-        match = re.search(r"#define MAX_PASSWORD\s+([0-9])", f.read())
+        match = re.search(r"#define MAX_PASSWORD\s+([0-9].*)", f.read())
         assert match is not None
         max_password_length = int(match.group(1))
+        assert max_password_length >= 996
 
     if max_password_length > 996 and PG_MAJOR_VERSION < 14:
         return 996
