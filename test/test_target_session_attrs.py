@@ -30,14 +30,14 @@ def test_target_session_attrs_primary_first(bouncer, replica):
         bouncer.test(dbname="primary_first")
 
 
-# def test_target_session_attrs_primary_second(bouncer, replica):
-#     bouncer.admin(f"set server_login_retry=1")
-#     bouncer.admin(f"set client_login_timeout=5")
-#     with bouncer.log_contains(
-#         r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
-#         1,
-#     ):
-#         bouncer.test(dbname="primary_second")
+@pytest.mark.timeout(62)
+def test_target_session_attrs_primary_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    with bouncer.log_contains(
+        r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
+        1,
+    ):
+        bouncer.test(dbname="primary_second")
 
 
 def test_target_session_attrs_standby_first(bouncer, replica):
@@ -45,14 +45,14 @@ def test_target_session_attrs_standby_first(bouncer, replica):
         bouncer.test(dbname="standby_first")
 
 
-# def test_target_session_attrs_standby_second(bouncer, replica):
-#     bouncer.admin(f"set server_login_retry=1")
-#     bouncer.admin(f"set client_login_timeout=5")
-#     with bouncer.log_contains(
-#         r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
-#         1,
-#     ):
-#         bouncer.test(dbname="standby_second")
+@pytest.mark.timeout(62)
+def test_target_session_attrs_standby_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    with bouncer.log_contains(
+        r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
+        1,
+    ):
+        bouncer.test(dbname="standby_second")
 
 
 def test_target_session_attrs_readonly_first(bouncer, replica):
@@ -60,14 +60,14 @@ def test_target_session_attrs_readonly_first(bouncer, replica):
         bouncer.test(dbname="readonly_first")
 
 
-# def test_target_session_attrs_readonly_second(bouncer, replica):
-#     bouncer.admin(f"set server_login_retry=1")
-#     bouncer.admin(f"set client_login_timeout=5")
-#     with bouncer.log_contains(
-#         r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
-#         1,
-#     ):
-#         bouncer.test(dbname="readonly_second")
+@pytest.mark.timeout(62)
+def test_target_session_attrs_readonly_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    with bouncer.log_contains(
+        r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
+        1,
+    ):
+        bouncer.test(dbname="readonly_second")
 
 
 def test_target_session_attrs_readonly_primary_in_transaction_read_only_first(
@@ -85,14 +85,14 @@ def test_target_session_attrs_readwrite_first(bouncer, replica):
         bouncer.test(dbname="readwrite_first")
 
 
-# def test_target_session_attrs_readwrite_second(bouncer, replica):
-#     bouncer.admin(f"set server_login_retry=1")
-#     bouncer.admin(f"set client_login_timeout=5")
-#     with bouncer.log_contains(
-#         r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
-#         1,
-#     ):
-#         bouncer.test(dbname="readwrite_second")
+@pytest.mark.timeout(62)
+def test_target_session_attrs_readwrite_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    with bouncer.log_contains(
+        r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
+        1,
+    ):
+        bouncer.test(dbname="readwrite_second")
 
 
 def test_target_session_attrs_any_primary_first(bouncer, replica):
