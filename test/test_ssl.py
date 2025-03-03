@@ -289,7 +289,7 @@ def test_client_ssl_reload_change_ca(bouncer, cert_dir):
     bouncer.psql_test(host="localhost", sslmode="verify-full", sslrootcert=new_root)
 
 
-def test_client_ssl_auth(bouncer, cert_dir):
+def test_client_ssl_auth(pg, bouncer, cert_dir):
     root = cert_dir / "TestCA1" / "ca.crt"
     key = cert_dir / "TestCA1" / "sites" / "01-localhost.key"
     cert = cert_dir / "TestCA1" / "sites" / "01-localhost.crt"
@@ -310,6 +310,8 @@ def test_client_ssl_auth(bouncer, cert_dir):
         sslkey=client_key,
         sslcert=client_cert,
     )
+    bouncer.write_ini(f"client_tls_sslmode = disable")
+    pg.reload()
 
 
 def test_client_ssl_scram(bouncer, cert_dir):
