@@ -18,12 +18,6 @@ def skip_if_macos_and_no_sudo():
         yield
 
 
-@pytest.fixture(autouse=True)
-def setup_test_target_session_attrs(bouncer):
-    bouncer.admin(f"set server_login_retry=1")
-    bouncer.admin(f"set client_login_timeout=5")
-
-
 @pytest.fixture
 def bouncer_transaction_read_only(bouncer):
     bouncer.pg.psql("ALTER DATABASE p0 SET default_transaction_read_only=on")
@@ -37,6 +31,8 @@ def test_target_session_attrs_primary_first(bouncer, replica):
 
 
 def test_target_session_attrs_primary_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    bouncer.admin(f"set client_login_timeout=5")
     with bouncer.log_contains(
         r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
         1,
@@ -50,6 +46,8 @@ def test_target_session_attrs_standby_first(bouncer, replica):
 
 
 def test_target_session_attrs_standby_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    bouncer.admin(f"set client_login_timeout=5")
     with bouncer.log_contains(
         r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
         1,
@@ -63,6 +61,8 @@ def test_target_session_attrs_readonly_first(bouncer, replica):
 
 
 def test_target_session_attrs_readonly_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    bouncer.admin(f"set client_login_timeout=5")
     with bouncer.log_contains(
         r"127.0.0.1:\d+ closing because: server does not satisfy target_session_attrs",
         1,
@@ -86,6 +86,8 @@ def test_target_session_attrs_readwrite_first(bouncer, replica):
 
 
 def test_target_session_attrs_readwrite_second(bouncer, replica):
+    bouncer.admin(f"set server_login_retry=1")
+    bouncer.admin(f"set client_login_timeout=5")
     with bouncer.log_contains(
         r"127.0.0.2:\d+ closing because: server does not satisfy target_session_attrs",
         1,
