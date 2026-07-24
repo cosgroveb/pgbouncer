@@ -299,6 +299,18 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 			/* Publish only the accepted backend's startup values. */
 			varcache_set_canonical(server, server->link);
 			varcache_fill_unset(&server->vars, server->link);
+			if (server->link->welcome_sent &&
+			    !parameter_status_queue_changes(server, server->link)) {
+				PgSocket *client = server->link;
+
+				server->link = NULL;
+				client->link = NULL;
+				disconnect_server(server, true,
+						  "ParameterStatus synchronization failed");
+				disconnect_client(client, true,
+						  "failed to synchronize ParameterStatus");
+				break;
+			}
 		}
 
 		/* got all params */

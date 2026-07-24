@@ -92,12 +92,15 @@ bool parameter_status_copy(ParameterStatus **dst, const ParameterStatus *src)
 	return true;
 }
 
-bool parameter_status_send_changes(const PgSocket *server, PgSocket *client)
+static bool add_parameter_status_changes(const PgSocket *server,
+					 PgSocket *client,
+					 PktBuf *pkt,
+					 bool *changes_p)
 {
 	const ParameterStatus *parameter;
 	const char *client_value;
-	PktBuf *pkt = pktbuf_temp();
-	bool send = false;
+
+	*changes_p = false;
 
 	for (parameter = server->parameters; parameter; parameter = parameter->next) {
 		if (varcache_is_tracked(parameter->name->str))
@@ -118,10 +121,33 @@ bool parameter_status_send_changes(const PgSocket *server, PgSocket *client)
 					  parameter->name->str,
 					  parameter->value->str))
 			return false;
-		send = true;
+		*changes_p = true;
 	}
 
-	return !send || pktbuf_send_immediate(pkt, client);
+	return true;
+}
+
+bool parameter_status_send_changes(const PgSocket *server, PgSocket *client)
+{
+	PktBuf *pkt = pktbuf_temp();
+	bool changes;
+
+	if (!add_parameter_status_changes(server, client, pkt, &changes))
+		return false;
+
+	return !changes || pktbuf_send_immediate(pkt, client);
+}
+
+bool parameter_status_queue_changes(PgSocket *server, PgSocket *client)
+{
+	PktBuf *pkt = pktbuf_temp();
+	bool changes;
+
+	if (!add_parameter_status_changes(server, client, pkt, &changes))
+		return false;
+
+	return !changes ||
+	       sbuf_queue_packet(&server->sbuf, &client->sbuf, pkt);
 }
 
 void parameter_status_clean(ParameterStatus **parameters)

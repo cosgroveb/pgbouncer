@@ -2439,8 +2439,8 @@ bool use_server_socket(int fd, PgAddr *addr,
 	server->suspended = true;
 	server->pool = pool;
 	server->login_user_credentials = credentials;
-	/* Takeover does not transfer target-session observations. */
-	server->close_needed = db->target_session_attrs != TARGET_SESSION_ANY;
+	/* Takeover does not transfer per-server ParameterStatus values. */
+	server->close_needed = true;
 	server->connect_time = server->request_time = get_cached_time();
 	server->query_start = 0;
 	statlist_init(&server->canceling_clients, "canceling_clients");
