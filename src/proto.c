@@ -338,9 +338,14 @@ bool add_welcome_parameter(PgPool *pool, const char *key, const char *val)
 	if (msg->write_pos == 0)
 		pktbuf_write_AuthenticationOk(msg);
 
-	/* if not stored in ->orig_vars, write full packet */
-	if (!varcache_set(&pool->orig_vars, key, val))
+	if (varcache_is_tracked(key)) {
+		if (!varcache_set(&pool->orig_vars, key, val))
+			return false;
+	} else {
+		if (!parameter_status_set(&pool->welcome_parameters, key, val))
+			return false;
 		pktbuf_write_ParameterStatus(msg, key, val);
+	}
 
 	return !msg->failed;
 }
@@ -352,6 +357,15 @@ void finish_welcome_msg(PgSocket *server)
 	if (pool->welcome_msg_ready)
 		return;
 	pool->welcome_msg_ready = true;
+}
+
+void reset_pool_welcome(PgPool *pool)
+{
+	pktbuf_free(pool->welcome_msg);
+	pool->welcome_msg = NULL;
+	pool->welcome_msg_ready = false;
+	parameter_status_clean(&pool->welcome_parameters);
+	varcache_clean(&pool->orig_vars);
 }
 
 bool welcome_client(PgSocket *client)
@@ -368,6 +382,11 @@ bool welcome_client(PgSocket *client)
 	pktbuf_put_bytes(msg, pmsg->buf, pmsg->write_pos);
 
 	/* fill vars */
+	if (!parameter_status_copy(&client->parameters, pool->welcome_parameters)) {
+		disconnect_client(client, true, "failed to store welcome parameters");
+		return false;
+	}
+
 	varcache_fill_unset(&pool->orig_vars, client);
 	varcache_add_params(msg, &client->vars);
 

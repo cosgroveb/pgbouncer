@@ -930,11 +930,10 @@ void kill_pool(PgPool *pool)
 	close_server_list(&pool->tested_server_list, reason);
 	close_server_list(&pool->new_server_list, reason);
 
-	pktbuf_free(pool->welcome_msg);
+	reset_pool_welcome(pool);
 
 	list_del(&pool->map_head);
 	statlist_remove(&pool_list, &pool->head);
-	varcache_clean(&pool->orig_vars);
 	slab_free(var_list_cache, pool->orig_vars.var_list);
 	slab_free(pool_cache, pool);
 }
@@ -948,11 +947,10 @@ void kill_peer_pool(PgPool *pool)
 	close_server_list(&pool->active_cancel_server_list, reason);
 	close_server_list(&pool->new_server_list, reason);
 
-	pktbuf_free(pool->welcome_msg);
+	reset_pool_welcome(pool);
 
 	list_del(&pool->map_head);
 	statlist_remove(&peer_pool_list, &pool->head);
-	varcache_clean(&pool->orig_vars);
 	slab_free(var_list_cache, pool->orig_vars.var_list);
 	slab_free(peer_pool_cache, pool);
 }

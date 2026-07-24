@@ -961,6 +961,15 @@ bool find_server(PgSocket *client)
 		}
 	}
 
+	if (server && !sending_auth_query(client) &&
+	    !parameter_status_send_changes(server, client)) {
+		disconnect_server(server, true,
+				  "ParameterStatus synchronization failed");
+		disconnect_client(client, true,
+				  "failed to synchronize ParameterStatus");
+		return false;
+	}
+
 	/* link or send to waiters list */
 	if (server) {
 		slog_noise(client, "linking client to S-%p", server);
@@ -1377,6 +1386,8 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	case SV_BEING_CANCELED:
 		break;
 	case SV_LOGIN:
+		if (!server->pool->welcome_msg_ready)
+			reset_pool_welcome(server->pool);
 		/*
 		 * usually disconnect means problems in startup phase,
 		 * except when sending cancel packet
@@ -2541,12 +2552,7 @@ void tag_pool_dirty(PgPool *pool)
 	if (pool->db->admin)
 		return;
 
-	/* reset welcome msg */
-	if (pool->welcome_msg) {
-		pktbuf_free(pool->welcome_msg);
-		pool->welcome_msg = NULL;
-	}
-	pool->welcome_msg_ready = false;
+	reset_pool_welcome(pool);
 
 	/* drop all existing servers ASAP */
 	for_each_server(pool, tag_dirty);

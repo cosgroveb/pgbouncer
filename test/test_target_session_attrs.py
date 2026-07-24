@@ -79,37 +79,73 @@ def selected_role(bouncer, dbname):
     )
 
 
-def startup_parameters(bouncer, dbname):
+def recv_message(sock):
+    message_type = recv_exact(sock, 1)
+    message_length = struct.unpack("!I", recv_exact(sock, 4))[0]
+    return message_type, recv_exact(sock, message_length - 4)
+
+
+def recv_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            pytest.fail("server closed the connection")
+        data += chunk
+    return data
+
+
+def parameter_status_message(message):
+    key, value, _ = message.split(b"\0")
+    return key.decode(), value.decode()
+
+
+def protocol_connection(bouncer, dbname):
     startup = (
         struct.pack("!I", 196608)
         + b"user\0bouncer\0"
         + f"database\0{dbname}\0".encode()
         + b"\0"
     )
+    sock = socket.create_connection((bouncer.host, bouncer.port), timeout=10)
+    sock.sendall(struct.pack("!I", len(startup) + 4) + startup)
+    parameters = []
+    while True:
+        message_type, message = recv_message(sock)
+        if message_type == b"S":
+            parameters.append(parameter_status_message(message))
+        elif message_type == b"E":
+            sock.close()
+            pytest.fail(f"startup failed: {message!r}")
+        elif message_type == b"Z":
+            return sock, parameters
 
-    def recv_exact(sock, size):
-        data = b""
-        while len(data) < size:
-            chunk = sock.recv(size - len(data))
-            if not chunk:
-                pytest.fail("server closed the connection during startup")
-            data += chunk
-        return data
+
+def protocol_query(sock, query):
+    payload = query.encode() + b"\0"
+    sock.sendall(b"Q" + struct.pack("!I", len(payload) + 4) + payload)
 
     parameters = []
-    with socket.create_connection((bouncer.host, bouncer.port), timeout=10) as sock:
-        sock.sendall(struct.pack("!I", len(startup) + 4) + startup)
-        while True:
-            message_type = recv_exact(sock, 1)
-            message_length = struct.unpack("!I", recv_exact(sock, 4))[0]
-            message = recv_exact(sock, message_length - 4)
-            if message_type == b"S":
-                key, value, _ = message.split(b"\0")
-                parameters.append((key.decode(), value.decode()))
-            elif message_type == b"E":
-                pytest.fail(f"startup failed: {message!r}")
-            elif message_type == b"Z":
-                return parameters
+    value = None
+    while True:
+        message_type, message = recv_message(sock)
+        if message_type == b"S":
+            parameters.append(parameter_status_message(message))
+        elif message_type == b"D":
+            columns = struct.unpack("!H", message[:2])[0]
+            assert columns == 1
+            length = struct.unpack("!I", message[2:6])[0]
+            value = message[6 : 6 + length].decode()
+        elif message_type == b"E":
+            pytest.fail(f"query failed: {message!r}")
+        elif message_type == b"Z":
+            return value, parameters
+
+
+def startup_parameters(bouncer, dbname):
+    sock, parameters = protocol_connection(bouncer, dbname)
+    sock.close()
+    return parameters
 
 
 def test_target_session_attrs_admin_output(bouncer):
@@ -233,6 +269,49 @@ def test_rejected_server_parameters_are_not_cached(bouncer, target_replica):
     assert len(names) == len(set(names))
     assert dict(parameters)["in_hot_standby"] == "off"
     assert dict(parameters)["default_transaction_read_only"] == "off"
+
+
+@requires_replica
+async def test_parameter_status_follows_assigned_server(bouncer, target_replica):
+    bouncer.admin("SET server_round_robin=1")
+    results = await asyncio.gather(
+        bouncer.asql(
+            "SELECT pg_is_in_recovery() FROM pg_sleep(0.5)",
+            dbname="parameter_status_hosts",
+        ),
+        bouncer.asql(
+            "SELECT pg_is_in_recovery() FROM pg_sleep(0.5)",
+            dbname="parameter_status_hosts",
+        ),
+    )
+    assert {rows[0][0] for rows in results} == {False, True}
+
+    sock, startup = protocol_connection(bouncer, "parameter_status_hosts")
+    try:
+        current = dict(startup)["in_hot_standby"]
+        seen = {current}
+        for _ in range(4):
+            reported, parameters = protocol_query(sock, "SHOW in_hot_standby")
+            changes = dict(parameters)
+            if reported == current:
+                assert "in_hot_standby" not in changes
+            else:
+                assert changes["in_hot_standby"] == reported
+            current = reported
+            seen.add(reported)
+        assert seen == {"on", "off"}
+    finally:
+        sock.close()
+
+
+def test_parameter_status_does_not_repeat_unchanged_values(bouncer):
+    sock, startup = protocol_connection(bouncer, "parameter_status_single")
+    try:
+        reported, parameters = protocol_query(sock, "SHOW server_version")
+        assert reported == dict(startup)["server_version"]
+        assert "server_version" not in dict(parameters)
+    finally:
+        sock.close()
 
 
 def terminate_idle_server(bouncer, pg, dbname):

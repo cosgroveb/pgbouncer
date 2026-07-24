@@ -471,6 +471,7 @@ struct PgPool {
 
 	/* database info to be sent to client */
 	struct PktBuf *welcome_msg;	/* ServerParams without VarCache ones */
+	ParameterStatus *welcome_parameters;	/* untracked values in welcome_msg */
 
 	VarCache orig_vars;		/* default params from server */
 

@@ -138,6 +138,14 @@ bool varcache_set(VarCache *cache, const char *key, const char *value)
 	return true;
 }
 
+bool varcache_is_tracked(const char *key)
+{
+	const struct var_lookup *lookup = NULL;
+
+	HASH_FIND_STR(lookup_map, key, lookup);
+	return lookup != NULL;
+}
+
 static bool variable_is_guc_list_quote(const char *key)
 {
 	if (strcasecmp("search_path", key) == 0)

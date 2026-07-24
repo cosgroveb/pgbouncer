@@ -92,6 +92,38 @@ bool parameter_status_copy(ParameterStatus **dst, const ParameterStatus *src)
 	return true;
 }
 
+bool parameter_status_send_changes(const PgSocket *server, PgSocket *client)
+{
+	const ParameterStatus *parameter;
+	const char *client_value;
+	PktBuf *pkt = pktbuf_temp();
+	bool send = false;
+
+	for (parameter = server->parameters; parameter; parameter = parameter->next) {
+		if (varcache_is_tracked(parameter->name->str))
+			continue;
+
+		client_value = parameter_status_get(client->parameters,
+						    parameter->name->str);
+		if (client_value &&
+		    strcmp(client_value, parameter->value->str) == 0)
+			continue;
+
+		pktbuf_write_ParameterStatus(pkt,
+					     parameter->name->str,
+					     parameter->value->str);
+		if (pkt->failed)
+			return false;
+		if (!parameter_status_set(&client->parameters,
+					  parameter->name->str,
+					  parameter->value->str))
+			return false;
+		send = true;
+	}
+
+	return !send || pktbuf_send_immediate(pkt, client);
+}
+
 void parameter_status_clean(ParameterStatus **parameters)
 {
 	ParameterStatus *parameter;
