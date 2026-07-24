@@ -27,11 +27,17 @@
 
 #define ERRCODE_CANNOT_CONNECT_NOW "57P03"
 
+enum TargetSessionAttrValue {
+	TARGET_SESSION_ATTR_UNKNOWN,
+	TARGET_SESSION_ATTR_OFF,
+	TARGET_SESSION_ATTR_ON
+};
+
 static enum TargetSessionAttrValue parse_target_session_attr(const char *value)
 {
-	if (strcmp(value, "off") == 0)
+	if (value && strcmp(value, "off") == 0)
 		return TARGET_SESSION_ATTR_OFF;
-	if (strcmp(value, "on") == 0)
+	if (value && strcmp(value, "on") == 0)
 		return TARGET_SESSION_ATTR_ON;
 	return TARGET_SESSION_ATTR_UNKNOWN;
 }
@@ -55,10 +61,6 @@ static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
 	slog_debug(server, "S: param: %s = %s", key, val);
 	if (!parameter_status_set(&server->parameters, key, val))
 		goto failed_store;
-	if (strcmp(key, "in_hot_standby") == 0)
-		server->in_hot_standby = parse_target_session_attr(val);
-	else if (strcmp(key, "default_transaction_read_only") == 0)
-		server->default_transaction_read_only = parse_target_session_attr(val);
 
 	varcache_set(&server->vars, key, val);
 
@@ -83,19 +85,27 @@ failed_store:
 
 static bool server_matches_target_session_attrs(const PgSocket *server)
 {
+	enum TargetSessionAttrValue in_hot_standby;
+	enum TargetSessionAttrValue default_transaction_read_only;
+
+	in_hot_standby = parse_target_session_attr(
+		parameter_status_get(server->parameters, "in_hot_standby"));
+	default_transaction_read_only = parse_target_session_attr(
+		parameter_status_get(server->parameters, "default_transaction_read_only"));
+
 	switch (server->pool->db->target_session_attrs) {
 	case TARGET_SESSION_ANY:
 		return true;
 	case TARGET_SESSION_READ_WRITE:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_OFF &&
-		       server->default_transaction_read_only == TARGET_SESSION_ATTR_OFF;
+		return in_hot_standby == TARGET_SESSION_ATTR_OFF &&
+		       default_transaction_read_only == TARGET_SESSION_ATTR_OFF;
 	case TARGET_SESSION_READ_ONLY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_ON ||
-		       server->default_transaction_read_only == TARGET_SESSION_ATTR_ON;
+		return in_hot_standby == TARGET_SESSION_ATTR_ON ||
+		       default_transaction_read_only == TARGET_SESSION_ATTR_ON;
 	case TARGET_SESSION_PRIMARY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_OFF;
+		return in_hot_standby == TARGET_SESSION_ATTR_OFF;
 	case TARGET_SESSION_STANDBY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_ON;
+		return in_hot_standby == TARGET_SESSION_ATTR_ON;
 	}
 	return false;
 }
