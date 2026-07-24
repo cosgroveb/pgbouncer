@@ -85,9 +85,9 @@ filterwarnings = [
 extend-exclude = ["lib"]
 
 [tool.ruff.lint]
-# Ruff's default rules (a subset of pycodestyle E + pyflakes F); "I" adds
-# import sorting, replacing isort.
-extend-select = ["I"]
+# Keep the rule set explicit so Ruff releases cannot change lint scope. E4, E7,
+# E9, and F were Ruff's default before 0.16; I replaces isort.
+select = ["E4", "E7", "E9", "F", "I"]
 # F401 (unused import) and F541 (f-string without placeholders) were ignored
 # under the old flake8 config and the test suite still relies on that.
 ignore = ["F401", "F541"]
