@@ -551,6 +551,7 @@ pgbouncer_sources = files(
   'src/messages.c',
   'src/objects.c',
   'src/pam.c',
+  'src/parameter_status.c',
   'src/pktbuf.c',
   'src/pooler.c',
   'src/prepare.c',

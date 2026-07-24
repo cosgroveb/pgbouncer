@@ -188,6 +188,7 @@ extern int cf_sbuf_len;
 #include "iobuf.h"
 #include "sbuf.h"
 #include "pktbuf.h"
+#include "parameter_status.h"
 #include "varcache.h"
 #include "dnslookup.h"
 
@@ -806,6 +807,7 @@ struct PgSocket {
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
+	ParameterStatus *parameters;	/* server-reported or client-visible parameters */
 	enum TargetSessionAttrValue in_hot_standby;	/* server-reported state used during admission */
 	enum TargetSessionAttrValue default_transaction_read_only;	/* server-reported state used during admission */
 

@@ -989,6 +989,7 @@ static void cleanup(void)
 	event_base_free(pgb_event_base);
 
 	tls_deinit();
+	parameter_status_deinit();
 	varcache_deinit();
 	pktbuf_cleanup();
 

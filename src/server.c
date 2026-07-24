@@ -53,6 +53,8 @@ static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
 	if (!mbuf_get_string(&pkt->data, &val))
 		goto failed;
 	slog_debug(server, "S: param: %s = %s", key, val);
+	if (!parameter_status_set(&server->parameters, key, val))
+		goto failed_store;
 	if (strcmp(key, "in_hot_standby") == 0)
 		server->in_hot_standby = parse_target_session_attr(val);
 	else if (strcmp(key, "default_transaction_read_only") == 0)
