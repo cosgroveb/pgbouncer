@@ -11,7 +11,15 @@ import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from .utils import PG_MAJOR_VERSION, USE_UNIX_SOCKETS, Postgres, run
+from .utils import (
+    PG_MAJOR_VERSION,
+    TEST_DIR,
+    USE_UNIX_SOCKETS,
+    WINDOWS,
+    Bouncer,
+    Postgres,
+    run,
+)
 
 REPLICA_SOCKET_DIR = Path("/tmp/pgbouncer-test-replica")
 requires_replica = pytest.mark.skipif(
@@ -73,6 +81,32 @@ def target_retry_settings(bouncer):
     bouncer.admin("SET client_login_timeout=5")
 
 
+@pytest.fixture
+async def untracked_dtr_bouncer(pg, tmp_path):
+    base_ini = tmp_path / "untracked-dtr.ini"
+    updated, replacements = re.subn(
+        r"^track_extra_parameters = search_path, intervalstyle, "
+        r"default_transaction_read_only$",
+        "track_extra_parameters = search_path, intervalstyle",
+        (TEST_DIR / "test.ini").read_text(),
+        count=1,
+        flags=re.MULTILINE,
+    )
+    assert replacements == 1
+    base_ini.write_text(updated)
+
+    bouncer = Bouncer(
+        pg,
+        tmp_path / "u",
+        base_ini_path=base_ini,
+    )
+    await bouncer.start()
+    try:
+        yield bouncer
+    finally:
+        await bouncer.cleanup()
+
+
 def selected_role(bouncer, dbname):
     return bouncer.sql_value(
         "SELECT pg_is_in_recovery()", dbname=dbname, connect_timeout=10
@@ -100,11 +134,15 @@ def parameter_status_message(message):
     return key.decode(), value.decode()
 
 
-def protocol_connection(bouncer, dbname):
+def protocol_connection(bouncer, dbname, *, user="bouncer", replication=None):
+    replication_parameter = (
+        f"replication\0{replication}\0".encode() if replication else b""
+    )
     startup = (
         struct.pack("!I", 196608)
-        + b"user\0bouncer\0"
+        + f"user\0{user}\0".encode()
         + f"database\0{dbname}\0".encode()
+        + replication_parameter
         + b"\0"
     )
     sock = socket.create_connection((bouncer.host, bouncer.port), timeout=10)
@@ -259,6 +297,76 @@ def test_target_session_attrs_replication_retries_matching_server(
     ):
         assert conn.execute("SELECT pg_is_in_recovery()").fetchone() == (False,)
         assert conn.info.parameter_status("default_transaction_read_only") == "off"
+        assert conn.info.parameter_status("in_hot_standby") == "off"
+
+
+@requires_replica
+def test_cold_replication_does_not_repeat_server_parameters(bouncer, target_replica):
+    sock, parameters = protocol_connection(
+        bouncer,
+        "parameter_status_replication",
+        user="postgres",
+        replication="database",
+    )
+    try:
+        value, changes = protocol_query(sock, "SELECT 1")
+        parameters.extend(changes)
+        names = [name for name, _ in parameters]
+
+        assert value == "1"
+        assert len(names) == len(set(names))
+    finally:
+        sock.close()
+
+
+@requires_replica
+def test_warm_replication_reports_assigned_server_parameters(bouncer, target_replica):
+    with bouncer.conn(
+        dbname="parameter_status_replication",
+        user="postgres",
+        connect_timeout=10,
+    ) as conn:
+        assert conn.execute("SELECT pg_is_in_recovery()").fetchone() == (False,)
+        assert conn.info.parameter_status("in_hot_standby") == "off"
+
+    with bouncer.conn(
+        dbname="parameter_status_replication",
+        user="postgres",
+        replication="database",
+        connect_timeout=10,
+    ) as conn:
+        in_recovery = conn.execute("SELECT pg_is_in_recovery()").fetchone()[0]
+        expected = "on" if in_recovery else "off"
+
+        assert in_recovery is True
+        assert conn.info.parameter_status("in_hot_standby") == expected
+
+
+@requires_replica
+def test_reconnect_replication_reports_assigned_server_parameters(
+    bouncer, target_replica
+):
+    with bouncer.conn(
+        dbname="parameter_status_replication",
+        user="postgres",
+        connect_timeout=10,
+    ) as conn:
+        assert conn.execute("SELECT pg_is_in_recovery()").fetchone() == (False,)
+
+    with bouncer.conn(
+        dbname="parameter_status_replication",
+        user="postgres",
+        replication="database",
+        connect_timeout=10,
+    ) as conn:
+        assert conn.info.parameter_status("in_hot_standby") == "off"
+        bouncer.admin("RECONNECT parameter_status_replication")
+
+        in_recovery = conn.execute("SELECT pg_is_in_recovery()").fetchone()[0]
+        expected = "on" if in_recovery else "off"
+
+        assert in_recovery is True
+        assert conn.info.parameter_status("in_hot_standby") == expected
 
 
 @requires_replica
@@ -312,6 +420,123 @@ def test_parameter_status_does_not_repeat_unchanged_values(bouncer):
         assert "server_version" not in dict(parameters)
     finally:
         sock.close()
+
+
+@requires_replica
+async def test_untracked_dtr_follows_assigned_server(
+    untracked_dtr_bouncer, target_replica
+):
+    bouncer = untracked_dtr_bouncer
+    bouncer.admin("SET server_round_robin=1")
+    results = await asyncio.gather(
+        bouncer.asql(
+            "SELECT pg_is_in_recovery() FROM pg_sleep(0.5)",
+            dbname="parameter_status_hosts",
+        ),
+        bouncer.asql(
+            "SELECT pg_is_in_recovery() FROM pg_sleep(0.5)",
+            dbname="parameter_status_hosts",
+        ),
+    )
+    assert {rows[0][0] for rows in results} == {False, True}
+
+    sock, startup = protocol_connection(bouncer, "parameter_status_hosts")
+    try:
+        current = dict(startup)["default_transaction_read_only"]
+        seen = {current}
+        for _ in range(4):
+            reported, parameters = protocol_query(
+                sock, "SHOW default_transaction_read_only"
+            )
+            changes = dict(parameters)
+            if reported == current:
+                assert "default_transaction_read_only" not in changes
+            else:
+                assert changes["default_transaction_read_only"] == reported
+            current = reported
+            seen.add(reported)
+        assert seen == {"on", "off"}
+    finally:
+        sock.close()
+
+
+@pytest.mark.skipif(
+    PG_MAJOR_VERSION < 14,
+    reason="default_transaction_read_only was not reported before PostgreSQL 14",
+)
+def test_untracked_runtime_parameter_status_is_remembered(untracked_dtr_bouncer):
+    key = "default_transaction_read_only"
+    sock, startup = protocol_connection(
+        untracked_dtr_bouncer, "parameter_status_single"
+    )
+    try:
+        assert dict(startup)[key] == "off"
+
+        value, parameters = protocol_query(sock, "SET default_transaction_read_only=on")
+        assert value is None
+        assert dict(parameters)[key] == "on"
+
+        value, parameters = protocol_query(sock, "SHOW default_transaction_read_only")
+        assert value == "on"
+        assert key not in dict(parameters)
+    finally:
+        sock.close()
+
+
+@pytest.mark.skipif(
+    PG_MAJOR_VERSION < 14,
+    reason="default_transaction_read_only was not reported before PostgreSQL 14",
+)
+async def test_tracked_dtr_is_replayed_without_backend_notification(bouncer):
+    bouncer.admin("SET server_round_robin=1")
+    await asyncio.gather(
+        bouncer.asql("SELECT pg_sleep(0.5)", dbname="p0"),
+        bouncer.asql("SELECT pg_sleep(0.5)", dbname="p0"),
+    )
+
+    with bouncer.conn(dbname="p0") as conn:
+        conn.execute("SET default_transaction_read_only=on")
+        assert conn.info.parameter_status("default_transaction_read_only") == "on"
+
+        backend_pids = set()
+        for _ in range(4):
+            value, backend_pid = conn.execute(
+                "SELECT current_setting('default_transaction_read_only'), "
+                "pg_backend_pid()"
+            ).fetchone()
+            assert value == "on"
+            assert conn.info.parameter_status("default_transaction_read_only") == "on"
+            backend_pids.add(backend_pid)
+        assert len(backend_pids) == 2
+
+
+@pytest.mark.skipif(
+    WINDOWS or not USE_UNIX_SOCKETS,
+    reason="takeover test requires Unix sockets",
+)
+async def test_parameter_status_takeover_replaces_unknown_server(bouncer):
+    async with bouncer.acur(dbname="parameter_status_takeover") as cur:
+        await cur.execute("SELECT pg_backend_pid()")
+        first_pid = (await cur.fetchone())[0]
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            servers = bouncer.admin("SHOW SERVERS", row_factory=dict_row)
+            if any(
+                server["database"] == "parameter_status_takeover"
+                and server["state"] == "idle"
+                for server in servers
+            ):
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("server did not become idle before takeover")
+
+        await bouncer.reboot()
+
+        await cur.execute("SELECT pg_backend_pid()")
+        second_pid = (await cur.fetchone())[0]
+        assert second_pid != first_pid
 
 
 def terminate_idle_server(bouncer, pg, dbname):

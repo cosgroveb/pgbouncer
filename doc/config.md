@@ -243,6 +243,11 @@ allow other parameters to be tracked, they can be specified here, so that
 PgBouncer knows that they should be maintained in the client variable cache and
 restored in the server whenever the client becomes active.
 
+Parameters that are reported by PostgreSQL but are not tracked here follow the
+server connection. When a client is assigned a different server, PgBouncer
+reports values that differ from what that client last saw. Tracked parameters
+instead follow the client and are restored through the client variable cache.
+
 If you need to specify multiple values, use a comma-separated list (e.g.
 `default_transaction_read_only, IntervalStyle`)
 
