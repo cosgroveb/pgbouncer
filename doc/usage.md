@@ -49,6 +49,11 @@ Statement pooling
     pool immediately after a query completes. Multi-statement
     transactions are disallowed in this mode as they would break.
 
+In transaction and statement pooling, a client can use different server
+connections over its lifetime. Tracked parameter values follow the client. When
+a server is assigned, PgBouncer reports changes in other parameters from that
+server.
+
 The administration interface of **pgbouncer** consists of some new
 `SHOW` commands available when connected to a special "virtual"
 database **pgbouncer**.

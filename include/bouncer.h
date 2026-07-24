@@ -157,12 +157,6 @@ enum TargetSessionAttrs {
 	TARGET_SESSION_STANDBY
 };
 
-enum TargetSessionAttrValue {
-	TARGET_SESSION_ATTR_UNKNOWN,
-	TARGET_SESSION_ATTR_OFF,
-	TARGET_SESSION_ATTR_ON
-};
-
 #define is_server_socket(sk) ((sk)->state >= SV_FREE)
 
 
@@ -188,6 +182,7 @@ extern int cf_sbuf_len;
 #include "iobuf.h"
 #include "sbuf.h"
 #include "pktbuf.h"
+#include "parameter_status.h"
 #include "varcache.h"
 #include "dnslookup.h"
 
@@ -476,6 +471,7 @@ struct PgPool {
 
 	/* database info to be sent to client */
 	struct PktBuf *welcome_msg;	/* ServerParams without VarCache ones */
+	ParameterStatus *welcome_parameters;	/* untracked values in welcome_msg */
 
 	VarCache orig_vars;		/* default params from server */
 
@@ -806,8 +802,7 @@ struct PgSocket {
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
-	enum TargetSessionAttrValue in_hot_standby;	/* server-reported state used during admission */
-	enum TargetSessionAttrValue default_transaction_read_only;	/* server-reported state used during admission */
+	ParameterStatus *parameters;	/* server-reported or client-visible parameters */
 
 	/* client: prepared statements prepared by this client */
 	PgClientPreparedStatement *client_prepared_statements;

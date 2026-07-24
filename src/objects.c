@@ -191,6 +191,7 @@ void init_caches(void)
 static void client_free(PgSocket *client)
 {
 	free_client_prepared_statements(client);
+	parameter_status_clean(&client->parameters);
 	varcache_clean(&client->vars);
 	slab_free(var_list_cache, client->vars.var_list);
 	slab_free(client_cache, client);
@@ -212,6 +213,7 @@ static void server_free(PgSocket *server)
 
 	free_server_prepared_statements(server);
 	free(server->host);
+	parameter_status_clean(&server->parameters);
 	varcache_clean(&server->vars);
 	slab_free(var_list_cache, server->vars.var_list);
 	slab_free(server_cache, server);
@@ -959,6 +961,15 @@ bool find_server(PgSocket *client)
 		}
 	}
 
+	if (server && !sending_auth_query(client) &&
+	    !parameter_status_send_changes(server, client)) {
+		disconnect_server(server, true,
+				  "ParameterStatus synchronization failed");
+		disconnect_client(client, true,
+				  "failed to synchronize ParameterStatus");
+		return false;
+	}
+
 	/* link or send to waiters list */
 	if (server) {
 		slog_noise(client, "linking client to S-%p", server);
@@ -1375,6 +1386,8 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	case SV_BEING_CANCELED:
 		break;
 	case SV_LOGIN:
+		if (!server->pool->welcome_msg_ready)
+			reset_pool_welcome(server->pool);
 		/*
 		 * usually disconnect means problems in startup phase,
 		 * except when sending cancel packet
@@ -2426,8 +2439,8 @@ bool use_server_socket(int fd, PgAddr *addr,
 	server->suspended = true;
 	server->pool = pool;
 	server->login_user_credentials = credentials;
-	/* Takeover does not transfer target-session observations. */
-	server->close_needed = db->target_session_attrs != TARGET_SESSION_ANY;
+	/* Takeover does not transfer per-server ParameterStatus values. */
+	server->close_needed = true;
 	server->connect_time = server->request_time = get_cached_time();
 	server->query_start = 0;
 	statlist_init(&server->canceling_clients, "canceling_clients");
@@ -2539,12 +2552,7 @@ void tag_pool_dirty(PgPool *pool)
 	if (pool->db->admin)
 		return;
 
-	/* reset welcome msg */
-	if (pool->welcome_msg) {
-		pktbuf_free(pool->welcome_msg);
-		pool->welcome_msg = NULL;
-	}
-	pool->welcome_msg_ready = false;
+	reset_pool_welcome(pool);
 
 	/* drop all existing servers ASAP */
 	for_each_server(pool, tag_dirty);

@@ -27,16 +27,23 @@
 
 #define ERRCODE_CANNOT_CONNECT_NOW "57P03"
 
+enum TargetSessionAttrValue {
+	TARGET_SESSION_ATTR_UNKNOWN,
+	TARGET_SESSION_ATTR_OFF,
+	TARGET_SESSION_ATTR_ON
+};
+
 static enum TargetSessionAttrValue parse_target_session_attr(const char *value)
 {
-	if (strcmp(value, "off") == 0)
+	if (value && strcmp(value, "off") == 0)
 		return TARGET_SESSION_ATTR_OFF;
-	if (strcmp(value, "on") == 0)
+	if (value && strcmp(value, "on") == 0)
 		return TARGET_SESSION_ATTR_ON;
 	return TARGET_SESSION_ATTR_UNKNOWN;
 }
 
-static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
+static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup,
+			   const char **name_p, const char **value_p)
 {
 	const char *key, *val;
 	PgSocket *client = server->link;
@@ -53,10 +60,8 @@ static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
 	if (!mbuf_get_string(&pkt->data, &val))
 		goto failed;
 	slog_debug(server, "S: param: %s = %s", key, val);
-	if (strcmp(key, "in_hot_standby") == 0)
-		server->in_hot_standby = parse_target_session_attr(val);
-	else if (strcmp(key, "default_transaction_read_only") == 0)
-		server->default_transaction_read_only = parse_target_session_attr(val);
+	if (!parameter_status_set(&server->parameters, key, val))
+		goto failed_store;
 
 	varcache_set(&server->vars, key, val);
 
@@ -70,6 +75,10 @@ static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
 			goto failed_store;
 	}
 
+	if (name_p)
+		*name_p = key;
+	if (value_p)
+		*value_p = val;
 	return true;
 failed:
 	disconnect_server(server, true, "broken ParameterStatus packet");
@@ -81,19 +90,27 @@ failed_store:
 
 static bool server_matches_target_session_attrs(const PgSocket *server)
 {
+	enum TargetSessionAttrValue in_hot_standby;
+	enum TargetSessionAttrValue default_transaction_read_only;
+
+	in_hot_standby = parse_target_session_attr(
+		parameter_status_get(server->parameters, "in_hot_standby"));
+	default_transaction_read_only = parse_target_session_attr(
+		parameter_status_get(server->parameters, "default_transaction_read_only"));
+
 	switch (server->pool->db->target_session_attrs) {
 	case TARGET_SESSION_ANY:
 		return true;
 	case TARGET_SESSION_READ_WRITE:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_OFF &&
-		       server->default_transaction_read_only == TARGET_SESSION_ATTR_OFF;
+		return in_hot_standby == TARGET_SESSION_ATTR_OFF &&
+		       default_transaction_read_only == TARGET_SESSION_ATTR_OFF;
 	case TARGET_SESSION_READ_ONLY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_ON ||
-		       server->default_transaction_read_only == TARGET_SESSION_ATTR_ON;
+		return in_hot_standby == TARGET_SESSION_ATTR_ON ||
+		       default_transaction_read_only == TARGET_SESSION_ATTR_ON;
 	case TARGET_SESSION_PRIMARY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_OFF;
+		return in_hot_standby == TARGET_SESSION_ATTR_OFF;
 	case TARGET_SESSION_STANDBY:
-		return server->in_hot_standby == TARGET_SESSION_ATTR_ON;
+		return in_hot_standby == TARGET_SESSION_ATTR_ON;
 	}
 	return false;
 }
@@ -240,7 +257,7 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 		break;
 
 	case PqMsg_ParameterStatus:
-		res = load_parameter(server, pkt, true);
+		res = load_parameter(server, pkt, true, NULL, NULL);
 		break;
 
 	case PqMsg_ReadyForQuery:
@@ -272,14 +289,6 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 			if (had_login_failure)
 				safe_strcpy(pool->last_connect_failed_message, last_connect_failed_message, sizeof(pool->last_connect_failed_message));
 
-			/* Do not publish startup parameters from a rejected server. */
-			if (!pool->welcome_msg_ready) {
-				if (pool->welcome_msg) {
-					pktbuf_free(pool->welcome_msg);
-					pool->welcome_msg = NULL;
-				}
-				varcache_clean(&pool->orig_vars);
-			}
 			break;
 		}
 
@@ -290,6 +299,18 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 			/* Publish only the accepted backend's startup values. */
 			varcache_set_canonical(server, server->link);
 			varcache_fill_unset(&server->vars, server->link);
+			if (server->link->welcome_sent &&
+			    !parameter_status_queue_changes(server, server->link)) {
+				PgSocket *client = server->link;
+
+				server->link = NULL;
+				client->link = NULL;
+				disconnect_server(server, true,
+						  "ParameterStatus synchronization failed");
+				disconnect_client(client, true,
+						  "failed to synchronize ParameterStatus");
+				break;
+			}
 		}
 
 		/* got all params */
@@ -449,6 +470,8 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 	bool async_response = false;
 	struct List *item, *tmp;
 	bool ignore_packet = false;
+	const char *parameter_name = NULL;
+	const char *parameter_value = NULL;
 
 	Assert(!server->pool->db->admin);
 
@@ -484,7 +507,8 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 		break;
 
 	case PqMsg_ParameterStatus:
-		if (!load_parameter(server, pkt, false))
+		if (!load_parameter(server, pkt, false,
+				    &parameter_name, &parameter_value))
 			return false;
 		break;
 
@@ -649,6 +673,15 @@ static bool handle_server_work(PgSocket *server, PktHdr *pkt)
 			slog_noise(server, "not forwarding packet with type '%c' from server", pkt->type);
 			sbuf_prepare_skip(sbuf, pkt->len);
 		} else {
+			if (parameter_name &&
+			    !varcache_is_tracked(parameter_name) &&
+			    !parameter_status_set(&client->parameters,
+						  parameter_name,
+						  parameter_value)) {
+				disconnect_server(server, true,
+						  "failed to store ParameterStatus");
+				return false;
+			}
 			sbuf_prepare_send(sbuf, &client->sbuf, pkt->len);
 
 			/*
