@@ -31,6 +31,24 @@ env:
 # the same way.
 
 jobs:
+  scram-fuzz:
+    name: SCRAM parser fuzzing
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libevent-dev libssl-dev meson ninja-build pkg-config
+      - name: Build fuzz targets
+        run: |
+          CC=clang meson setup build-fuzz -Dfuzzers=true -Db_sanitize=address,undefined
+          meson compile -C build-fuzz fuzz_scram_client_first fuzz_scram_client_final
+      - name: Run bounded fuzzing
+        run: |
+          ASAN_OPTIONS=detect_leaks=1 build-fuzz/test/fuzz/fuzz_scram_client_first -runs=10000 test/fuzz/corpus/client_first
+          ASAN_OPTIONS=detect_leaks=1 build-fuzz/test/fuzz/fuzz_scram_client_final -runs=10000 test/fuzz/corpus/client_final
+
   # Builds and tests on native GitHub-hosted Ubuntu runners. These run as the
   # unprivileged `runner` user, so unlike the Cirrus containers there is no
   # need to create a separate user and su into it.

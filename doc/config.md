@@ -466,6 +466,23 @@ scram-sha-256
 :   Use password check with SCRAM-SHA-256.  `auth_file` has to contain
     SCRAM secrets or plain-text passwords.
 
+    On TLS connections, PgBouncer advertises both `SCRAM-SHA-256-PLUS` and
+    `SCRAM-SHA-256`. Clients using `channel_binding=prefer` select
+    `SCRAM-SHA-256-PLUS`, while `channel_binding=disable` selects
+    `SCRAM-SHA-256`. Clients using `channel_binding=require` fail to connect
+    without TLS or if channel binding is unavailable. PgBouncer has no setting
+    to disable or require channel binding; clients enforce their own policy.
+
+    Existing SCRAM verifiers and plain-text passwords do not need to be
+    changed. Channel binding protects the client-to-PgBouncer TLS connection.
+    Authentication between PgBouncer and PostgreSQL is unchanged.
+
+        psql "host=pgbouncer.example.internal \
+          sslmode=verify-full \
+          channel_binding=require \
+          dbname=payments \
+          user=application"
+
 plain
 :   The clear-text password is sent over the wire.  Deprecated.
 
