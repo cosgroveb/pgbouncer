@@ -44,13 +44,6 @@
 #define ACT_SKIP 2
 #define ACT_CALL 3
 
-enum TLSState {
-	SBUF_TLS_NONE,
-	SBUF_TLS_DO_HANDSHAKE,
-	SBUF_TLS_IN_HANDSHAKE,
-	SBUF_TLS_OK,
-};
-
 enum WaitType {
 	W_NONE = 0,
 	W_CONNECT,

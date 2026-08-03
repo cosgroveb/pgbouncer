@@ -44,6 +44,13 @@ typedef enum {
 
 struct tls;
 
+enum TLSState {
+	SBUF_TLS_NONE,
+	SBUF_TLS_DO_HANDSHAKE,
+	SBUF_TLS_IN_HANDSHAKE,
+	SBUF_TLS_OK,
+};
+
 /* fwd def */
 typedef struct SBuf SBuf;
 typedef struct SBufIO SBufIO;

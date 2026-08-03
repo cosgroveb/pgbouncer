@@ -24,6 +24,7 @@
 #include "pam.h"
 #include "scram.h"
 #include "common/builtins.h"
+#include "common/scram-common.h"
 
 #include <usual/pgutil.h>
 #include <usual/slab.h>
@@ -141,7 +142,18 @@ static bool send_client_authreq(PgSocket *client)
 	} else if (auth_type == AUTH_TYPE_PLAIN || auth_type == AUTH_TYPE_LDAP || auth_type == AUTH_TYPE_PAM) {
 		SEND_generic(res, client, PqMsg_AuthenticationRequest, "i", AUTH_REQ_PASSWORD);
 	} else if (auth_type == AUTH_TYPE_SCRAM_SHA_256) {
-		SEND_generic(res, client, PqMsg_AuthenticationRequest, "iss", AUTH_REQ_SASL, "SCRAM-SHA-256", "");
+		if (client->sbuf.tls != NULL && client->sbuf.tls_state == SBUF_TLS_OK) {
+			SEND_generic(res, client, PqMsg_AuthenticationRequest, "isss",
+				     AUTH_REQ_SASL,
+				     SCRAM_SHA_256_PLUS_NAME,
+				     SCRAM_SHA_256_NAME,
+				     "");
+		} else {
+			SEND_generic(res, client, PqMsg_AuthenticationRequest, "iss",
+				     AUTH_REQ_SASL,
+				     SCRAM_SHA_256_NAME,
+				     "");
+		}
 	} else {
 		return false;
 	}
@@ -1119,6 +1131,11 @@ static bool scram_client_first(PgSocket *client, uint32_t datalen, const uint8_t
 	int res;
 	PgCredentials *user = client->login_user_credentials;
 
+	if (memchr(data, '\0', datalen) != NULL) {
+		slog_error(client, "malformed SCRAM client-first-message (embedded NUL)");
+		return false;
+	}
+
 	ibuf = malloc(datalen + 1);
 	if (ibuf == NULL)
 		return false;
@@ -1166,6 +1183,11 @@ static bool scram_client_final(PgSocket *client, uint32_t datalen, const uint8_t
 	char *proof = NULL;
 	char *server_final_message;
 	int res;
+
+	if (memchr(data, '\0', datalen) != NULL) {
+		slog_error(client, "malformed SCRAM client-final-message (embedded NUL)");
+		return false;
+	}
 
 	ibuf = malloc(datalen + 1);
 	if (ibuf == NULL)
@@ -1331,20 +1353,36 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 			const char *mech;
 			uint32_t length;
 			const uint8_t *data;
+			bool tls_established = client->sbuf.tls != NULL &&
+					       client->sbuf.tls_state == SBUF_TLS_OK;
 
 			if (!client->scram_state.server_nonce) {
 				/* process as SASLInitialResponse */
-				if (!mbuf_get_string(&pkt->data, &mech))
+				if (!mbuf_get_string(&pkt->data, &mech)) {
+					disconnect_client(client, true, "malformed SASL initial response");
 					return false;
+				}
 				slog_debug(client, "C: selected SASL mechanism: %s", mech);
-				if (strcmp(mech, "SCRAM-SHA-256") != 0) {
+				if (strcmp(mech, SCRAM_SHA_256_NAME) == 0) {
+					client->scram_state.channel_binding_in_use = false;
+				} else if (strcmp(mech, SCRAM_SHA_256_PLUS_NAME) == 0 && tls_established) {
+					client->scram_state.channel_binding_in_use = true;
+				} else {
 					disconnect_client(client, true, "client selected an invalid SASL authentication mechanism");
 					return false;
 				}
-				if (!mbuf_get_uint32be(&pkt->data, &length))
+				if (!mbuf_get_uint32be(&pkt->data, &length)) {
+					disconnect_client(client, true, "malformed SASL initial response");
 					return false;
-				if (!mbuf_get_bytes(&pkt->data, length, &data))
+				}
+				if (!mbuf_get_bytes(&pkt->data, length, &data)) {
+					disconnect_client(client, true, "malformed SASL initial response");
 					return false;
+				}
+				if (mbuf_avail_for_read(&pkt->data) != 0) {
+					disconnect_client(client, true, "malformed SASL initial response");
+					return false;
+				}
 				if (!scram_client_first(client, length, data)) {
 					disconnect_client(client, true, "SASL authentication failed");
 					return false;
