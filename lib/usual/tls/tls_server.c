@@ -20,7 +20,10 @@
 #ifdef USUAL_LIBSSL_FOR_TLS
 
 #include <openssl/ec.h>
+#include <openssl/evp.h>
+#include <openssl/objects.h>
 #include <openssl/ssl.h>
+#include <openssl/x509.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
 
@@ -48,6 +51,78 @@ struct tls *tls_server_conn(struct tls *ctx)
 	conn_ctx->flags |= TLS_SERVER_CONN;
 
 	return (conn_ctx);
+}
+
+int tls_get_server_end_point_hash(struct tls *ctx, uint8_t *result,
+				  size_t result_size, size_t *result_len)
+{
+	const EVP_MD *md;
+	X509 *cert;
+	int md_nid;
+	int md_size;
+#ifndef HAVE_X509_GET_SIGNATURE_INFO
+	int sig_nid;
+#endif
+	unsigned int len;
+
+	if (ctx == NULL || (ctx->flags & TLS_SERVER_CONN) == 0 ||
+	    ctx->ssl_conn == NULL) {
+		if (ctx != NULL)
+			tls_set_errorx(ctx, "not a server connection context");
+		return -1;
+	}
+	if (result == NULL || result_len == NULL) {
+		tls_set_errorx(ctx, "invalid server certificate hash output");
+		return -1;
+	}
+
+	cert = SSL_get_certificate(ctx->ssl_conn);
+	if (cert == NULL) {
+		tls_set_errorx(ctx, "no server certificate available");
+		return -1;
+	}
+
+#ifdef HAVE_X509_GET_SIGNATURE_INFO
+	if (X509_get_signature_info(cert, &md_nid, NULL, NULL, NULL) != 1) {
+		tls_set_errorx(ctx, "could not determine server certificate signature algorithm");
+		return -1;
+	}
+#else
+#ifdef HAVE_X509_GET_SIGNATURE_NID
+	sig_nid = X509_get_signature_nid(cert);
+#elif defined(USE_LIBSSL_INTERNALS)
+	sig_nid = OBJ_obj2nid(cert->sig_alg->algorithm);
+#else
+	sig_nid = NID_undef;
+#endif
+	if (sig_nid == NID_undef ||
+	    OBJ_find_sigid_algs(sig_nid, &md_nid, NULL) != 1) {
+		tls_set_errorx(ctx, "could not determine server certificate signature algorithm");
+		return -1;
+	}
+#endif
+
+	if (md_nid == NID_md5 || md_nid == NID_sha1)
+		md_nid = NID_sha256;
+	md = EVP_get_digestbynid(md_nid);
+	if (md == NULL) {
+		tls_set_errorx(ctx, "unsupported server certificate signature algorithm");
+		return -1;
+	}
+
+	md_size = EVP_MD_size(md);
+	if (md_size <= 0 || result_size < (size_t)md_size) {
+		tls_set_errorx(ctx, "server certificate hash output buffer is too small");
+		return -1;
+	}
+
+	if (X509_digest(cert, md, result, &len) != 1 || len != (unsigned int)md_size) {
+		tls_set_errorx(ctx, "could not hash server certificate");
+		return -1;
+	}
+
+	*result_len = len;
+	return 0;
 }
 
 #define PG_ALPN_PROTOCOL_VECTOR { 10, 'p', 'o', 's', 't', 'g', 'r', 'e', 's', 'q', 'l' }

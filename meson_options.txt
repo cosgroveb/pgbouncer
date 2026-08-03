@@ -8,6 +8,9 @@ option('cassert', type: 'boolean', value: false,
 option('pytest', type: 'string', value: '',
        description: 'Path to the pytest binary used to run the test suite (default: the pytest script if on PATH, else python -m pytest)')
 
+option('fuzzers', type: 'boolean', value: false,
+       description: 'Build SCRAM parser fuzz targets')
+
 option('evdns', type: 'boolean', value: true,
        description: 'Use libevent for DNS lookups (only used when c-ares is not available)')
 

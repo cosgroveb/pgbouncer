@@ -118,6 +118,8 @@ int tls_config_parse_protocols(uint32_t *_protocols, const char *_protostr);
 
 struct tls *tls_client(void);
 struct tls *tls_server(void);
+int tls_get_server_end_point_hash(struct tls *_ctx, uint8_t *_result,
+				  size_t _result_size, size_t *_result_len);
 int tls_configure(struct tls *_ctx, struct tls_config *_config);
 void tls_reset(struct tls *_ctx);
 void usual_tls_free(struct tls *_ctx);

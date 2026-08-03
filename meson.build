@@ -323,8 +323,14 @@ if openssl.found()
   cdata.set('OPENSSL_API_COMPAT', '0x00908000L',
             description: 'OpenSSL API version in use, to silence deprecation warnings.')
 
-  # LibreSSL-only helpers, used when present.
-  foreach func : ['SSL_CTX_use_certificate_chain_mem', 'SSL_CTX_load_verify_mem', 'asn1_time_parse']
+  # TLS library helpers, used when present.
+  foreach func : [
+    'SSL_CTX_use_certificate_chain_mem',
+    'SSL_CTX_load_verify_mem',
+    'asn1_time_parse',
+    'X509_get_signature_info',
+    'X509_get_signature_nid',
+  ]
     cdata.set('HAVE_' + func.to_upper(),
               cc.has_function(func, dependencies: openssl) ? 1 : false)
   endforeach
