@@ -324,7 +324,8 @@ def test_client_ssl_auth(bouncer_tls, cert_dir):
 
 
 @pytest.mark.skipif("not PG_SUPPORTS_SCRAM")
-def test_client_ssl_scram(bouncer_tls, cert_dir):
+@pytest.mark.parametrize("channel_binding", ["disable", "prefer", "require"])
+def test_client_ssl_scram(bouncer_tls, cert_dir, channel_binding):
     root = cert_dir / "TestCA1" / "ca.crt"
     key = cert_dir / "TestCA1" / "sites" / "01-localhost.key"
     cert = cert_dir / "TestCA1" / "sites" / "01-localhost.crt"
@@ -341,7 +342,23 @@ def test_client_ssl_scram(bouncer_tls, cert_dir):
         password="zzzz",
         sslmode="verify-full",
         sslrootcert=root,
+        channel_binding=channel_binding,
     )
+
+
+@pytest.mark.skipif("not PG_SUPPORTS_SCRAM")
+def test_client_scram_channel_binding_requires_tls(bouncer_tls):
+    bouncer_tls.write_ini(f"client_tls_sslmode = disable")
+    bouncer_tls.write_ini(f"auth_type = scram-sha-256")
+    bouncer_tls.admin("reload")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        bouncer_tls.psql_test(
+            user="bouncer",
+            password="zzzz",
+            sslmode="disable",
+            channel_binding="require",
+        )
 
 
 def test_ssl_replication(pg, bouncer_tls, cert_dir):

@@ -28,6 +28,9 @@
 #include "common/scram-common.h"
 #include "common/hmac.h"
 
+#define SCRAM_CHANNEL_BINDING_TYPE "tls-server-end-point"
+#define SCRAM_CHANNEL_BINDING_HEADER "p=" SCRAM_CHANNEL_BINDING_TYPE ",,"
+
 
 static bool calculate_client_proof(PgSocket *server,
 				   const PgCredentials *credentials,
@@ -625,21 +628,56 @@ bool read_client_first_message(PgSocket *client, char *input)
 	char *client_first_message_bare = NULL;
 	char *client_nonce = NULL;
 	char *client_nonce_copy = NULL;
+	char *channel_binding_name;
+	char *channel_binding_name_end;
 
 	state->cbind_flag = *input;
 	switch (*input) {
 	case 'n':
 		/* Client does not support channel binding */
+		if (state->channel_binding_in_use) {
+			slog_error(client, "SCRAM-SHA-256-PLUS requires channel binding");
+			goto failed;
+		}
 		input++;
 		break;
 	case 'y':
-		/* Client supports channel binding, but we're not doing it today */
+		/* Client reports support and no channel-binding offer from PgBouncer. */
+		if (state->channel_binding_in_use) {
+			slog_error(client, "SCRAM-SHA-256-PLUS requires channel binding");
+			goto failed;
+		}
+		if (client->sbuf.tls != NULL) {
+			slog_error(client, "SCRAM channel binding downgrade detected");
+			goto failed;
+		}
 		input++;
 		break;
 	case 'p':
-		/* Client requires channel binding.  We don't support it. */
-		slog_error(client, "client requires SCRAM channel binding, but it is not supported");
-		goto failed;
+		if (!state->channel_binding_in_use) {
+			slog_error(client, "client selected channel binding without SCRAM-SHA-256-PLUS");
+			goto failed;
+		}
+		input++;
+		if (*input != '=') {
+			slog_error(client, "malformed SCRAM channel-binding flag");
+			goto failed;
+		}
+		channel_binding_name = ++input;
+		channel_binding_name_end = strchr(channel_binding_name, ',');
+		if (channel_binding_name_end == NULL) {
+			slog_error(client, "malformed SCRAM channel-binding flag");
+			goto failed;
+		}
+		if ((size_t)(channel_binding_name_end - channel_binding_name) !=
+		    strlen(SCRAM_CHANNEL_BINDING_TYPE) ||
+		    memcmp(channel_binding_name, SCRAM_CHANNEL_BINDING_TYPE,
+			   strlen(SCRAM_CHANNEL_BINDING_TYPE)) != 0) {
+			slog_error(client, "unsupported SCRAM channel-binding type");
+			goto failed;
+		}
+		input = channel_binding_name_end;
+		break;
 	default:
 		slog_error(client, "malformed SCRAM message (unexpected channel-binding flag \"%s\")",
 			   sanitize_char(*input));
@@ -674,7 +712,8 @@ bool read_client_first_message(PgSocket *client, char *input)
 	}
 
 	/* read and ignore user name */
-	read_attr_value(client, &input, 'n');
+	if (read_attr_value(client, &input, 'n') == NULL)
+		goto failed;
 
 	client_nonce = read_attr_value(client, &input, 'r');
 	if (client_nonce == NULL)
@@ -719,24 +758,49 @@ bool read_client_final_message(PgSocket *client, const uint8_t *raw_input, char 
 	char *encoded_proof;
 	uint8_t *proof = NULL;
 	int prooflen;
+	char expected_channel_binding[4 * ((sizeof(SCRAM_CHANNEL_BINDING_HEADER) - 1 +
+					    PG_SHA512_DIGEST_LENGTH + 2) / 3) + 1];
+	uint8_t channel_binding_data[sizeof(SCRAM_CHANNEL_BINDING_HEADER) - 1 +
+				     PG_SHA512_DIGEST_LENGTH];
+	size_t certificate_hash_len;
+	int channel_binding_len;
 
-	/*
-	 * Read channel-binding.  We don't support channel binding, so
-	 * it's expected to always be "biws", which is "n,,",
-	 * base64-encoded, or "eSws", which is "y,,".  We also have to
-	 * check whether the flag is the same one that the client
-	 * originally sent.
-	 */
+	/* Read and validate channel binding before accepting the proof. */
 	channel_binding = read_attr_value(client, &input, 'c');
 	if (channel_binding == NULL)
 		goto failed;
-	if (!(strcmp(channel_binding, "biws") == 0 && state->cbind_flag == 'n') &&
-	    !(strcmp(channel_binding, "eSws") == 0 && state->cbind_flag == 'y')) {
+	if (state->channel_binding_in_use) {
+		memcpy(channel_binding_data, SCRAM_CHANNEL_BINDING_HEADER,
+		       sizeof(SCRAM_CHANNEL_BINDING_HEADER) - 1);
+		if (tls_get_server_end_point_hash(
+			    client->sbuf.tls,
+			    channel_binding_data + sizeof(SCRAM_CHANNEL_BINDING_HEADER) - 1,
+			    PG_SHA512_DIGEST_LENGTH, &certificate_hash_len) != 0) {
+			slog_error(client, "could not calculate SCRAM channel binding: %s",
+				   tls_error(client->sbuf.tls));
+			goto failed;
+		}
+		channel_binding_len = pg_b64_encode(
+			channel_binding_data,
+			sizeof(SCRAM_CHANNEL_BINDING_HEADER) - 1 + certificate_hash_len,
+			expected_channel_binding,
+			sizeof(expected_channel_binding) - 1);
+		if (channel_binding_len < 0)
+			goto failed;
+		expected_channel_binding[channel_binding_len] = '\0';
+		if (strcmp(channel_binding, expected_channel_binding) != 0) {
+			slog_error(client, "incorrect SCRAM channel binding");
+			goto failed;
+		}
+	} else if (!(strcmp(channel_binding, "biws") == 0 && state->cbind_flag == 'n') &&
+		   !(strcmp(channel_binding, "eSws") == 0 && state->cbind_flag == 'y')) {
 		slog_error(client, "unexpected SCRAM channel-binding attribute in client-final-message");
 		goto failed;
 	}
 
 	client_final_nonce = read_attr_value(client, &input, 'r');
+	if (client_final_nonce == NULL)
+		goto failed;
 
 	/* ignore optional extensions */
 	do {

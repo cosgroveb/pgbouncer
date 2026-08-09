@@ -780,6 +780,7 @@ struct PgSocket {
 
 		/* Server-side fields (when clients connect to PgBouncer) */
 		char cbind_flag;
+		bool channel_binding_in_use;
 		bool adhoc;	/* SCRAM data made up from plain-text password */
 		char *encoded_salt;	/* base64-encoded salt for server messages */
 		uint8_t ClientKey[32];

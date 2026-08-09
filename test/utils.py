@@ -198,11 +198,9 @@ def get_build_feature(config_mak_key, meson_define):
     """Detect whether pgbouncer was built with a certain feature enabled.
 
     An autotools build records this in config.mak, a meson build in the
-    generated test_config.h header. For meson we assume the conventional
-    "build" directory name, since the tests have no way of knowing where
-    the build directory actually is.
+    generated test_config.h header next to the configured BOUNCER_EXE.
     """
-    meson_config = Path("../build/test_config.h")
+    meson_config = Path(BOUNCER_EXE).resolve().parent / "test_config.h"
     if meson_config.exists():
         return (
             re.search(rf"#define {meson_define}\b", meson_config.read_text())
@@ -213,6 +211,12 @@ def get_build_feature(config_mak_key, meson_define):
         match = re.search(rf"{config_mak_key} = (\w+)", config_mak.read_text())
         assert match is not None
         return match.group(1) == "yes"
+    meson_config = Path("../build/test_config.h")
+    if meson_config.exists():
+        return (
+            re.search(rf"#define {meson_define}\b", meson_config.read_text())
+            is not None
+        )
     raise FileNotFoundError(
         "Could not find ../config.mak (autotools) or ../build/test_config.h (meson). "
         "Configure the project first, and for meson use 'build' as the build directory."
