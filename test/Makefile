@@ -9,7 +9,7 @@ SUBLOC = test
 DIST_SUBDIRS = ssl
 
 
-noinst_PROGRAMS = hba_test tls_server_end_point_test
+noinst_PROGRAMS = hba_test tls_server_end_point_test $(SCRAM_STATE_TEST)
 hba_test_CPPFLAGS = -I../include $(LIBEVENT_CFLAGS)
 hba_test_LDADD = $(LIBEVENT_LIBS) $(TLS_LIBS)
 hba_test_CFLAGS = -O0
@@ -21,6 +21,12 @@ tls_server_end_point_test_LDADD = $(TLS_LIBS)
 tls_server_end_point_test_CFLAGS = -O0
 tls_server_end_point_test_SOURCES = tls_server_end_point_test.c
 tls_server_end_point_test_EMBED_LIBUSUAL = 1
+
+scram_state_test_CPPFLAGS = -I../include -I../lib $(LIBEVENT_CFLAGS)
+scram_state_test_LDADD = $(LIBEVENT_LIBS)
+scram_state_test_CFLAGS = -O0 $(SCRAM_STATE_TEST_CFLAGS)
+scram_state_test_LDFLAGS = $(SCRAM_STATE_TEST_LDFLAGS)
+scram_state_test_SOURCES = scram_state_test.c ../src/scram.c ../src/common/base64.c
 
 EXTRA_PROGRAMS = asynctest
 asynctest_CPPFLAGS = -I../include $(PG_CPPFLAGS) $(LIBEVENT_CFLAGS)
@@ -38,3 +44,4 @@ include ../lib/mk/antimake.mk
 check: all
 	./hba_test
 	./tls_server_end_point_test
+	if test -n "$(SCRAM_STATE_TEST)"; then ./$(SCRAM_STATE_TEST); fi

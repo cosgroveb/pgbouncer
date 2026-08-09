@@ -14,6 +14,48 @@ AC_USUAL_INIT
 dnl Checks for programs.
 AC_USUAL_PROGRAM_CHECK
 
+dnl Find compiler and linker flags for the standalone SCRAM state test.  The
+dnl test links selected functions from scram.c and discards the rest of that
+dnl object.
+SCRAM_STATE_TEST=
+SCRAM_STATE_TEST_CFLAGS=
+SCRAM_STATE_TEST_LDFLAGS=
+scram_state_test_save_CFLAGS="$CFLAGS"
+AC_MSG_CHECKING([whether compiler supports -ffunction-sections])
+CFLAGS="$scram_state_test_save_CFLAGS -ffunction-sections"
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM([], [])],
+  [SCRAM_STATE_TEST_CFLAGS=-ffunction-sections], [])
+CFLAGS="$scram_state_test_save_CFLAGS"
+if test -n "$SCRAM_STATE_TEST_CFLAGS"; then
+  AC_MSG_RESULT([yes])
+else
+  AC_MSG_RESULT([no])
+fi
+
+scram_state_test_save_LDFLAGS="$LDFLAGS"
+AC_MSG_CHECKING([for linker flag to discard unused sections])
+for scram_state_test_flag in '-Wl,--gc-sections' '-Wl,-dead_strip'; do
+  LDFLAGS="$scram_state_test_save_LDFLAGS $scram_state_test_flag"
+  AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])],
+    [SCRAM_STATE_TEST_LDFLAGS="$scram_state_test_flag"], [])
+  if test -n "$SCRAM_STATE_TEST_LDFLAGS"; then
+    break
+  fi
+done
+LDFLAGS="$scram_state_test_save_LDFLAGS"
+if test -n "$SCRAM_STATE_TEST_LDFLAGS"; then
+  AC_MSG_RESULT([$SCRAM_STATE_TEST_LDFLAGS])
+else
+  AC_MSG_RESULT([none])
+fi
+if test -n "$SCRAM_STATE_TEST_CFLAGS" &&
+   test -n "$SCRAM_STATE_TEST_LDFLAGS"; then
+  SCRAM_STATE_TEST=scram_state_test
+fi
+AC_SUBST(SCRAM_STATE_TEST)
+AC_SUBST(SCRAM_STATE_TEST_CFLAGS)
+AC_SUBST(SCRAM_STATE_TEST_LDFLAGS)
+
 PKG_PROG_PKG_CONFIG
 
 AC_CHECK_PROGS(PANDOC, pandoc, pandoc)

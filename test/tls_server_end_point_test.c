@@ -59,6 +59,7 @@ static int test_certificate(const char *name)
 	uint8_t actual[EVP_MAX_MD_SIZE];
 	size_t expected_len;
 	size_t actual_len;
+	size_t undersized_len;
 	SSL_CTX *ssl_ctx = NULL;
 	SSL *ssl = NULL;
 	struct tls tls_ctx = {0};
@@ -97,9 +98,12 @@ static int test_certificate(const char *name)
 		fprintf(stderr, "%s: certificate hash mismatch\n", name);
 		goto done;
 	}
-	if (tls_get_server_end_point_hash(&tls_ctx, actual, actual_len - 1,
-					  &actual_len) == 0) {
-		fprintf(stderr, "%s: undersized output buffer was accepted\n", name);
+	undersized_len = actual_len - 1;
+	actual_len = sizeof(actual);
+	if (tls_get_server_end_point_hash(&tls_ctx, actual, undersized_len,
+					  &actual_len) == 0 ||
+	    actual_len != 0) {
+		fprintf(stderr, "%s: undersized output buffer left a result\n", name);
 		goto done;
 	}
 	if (tls_get_server_end_point_hash(&tls_ctx, actual, sizeof(actual), NULL) == 0) {
@@ -108,9 +112,11 @@ static int test_certificate(const char *name)
 	}
 #ifdef TEST_WRAP_X509_DIGEST
 	fail_x509_digest = true;
+	actual_len = sizeof(actual);
 	if (tls_get_server_end_point_hash(&tls_ctx, actual, sizeof(actual),
-					  &actual_len) == 0) {
-		fprintf(stderr, "%s: X509_digest failure was ignored\n", name);
+					  &actual_len) == 0 ||
+	    actual_len != 0) {
+		fprintf(stderr, "%s: X509_digest failure left a result\n", name);
 		goto done;
 	}
 	fail_x509_digest = false;
@@ -143,9 +149,11 @@ static int test_missing_certificate(void)
 		goto done;
 	tls_ctx.flags = TLS_SERVER_CONN;
 	tls_ctx.ssl_conn = ssl;
+	actual_len = sizeof(actual);
 	if (tls_get_server_end_point_hash(&tls_ctx, actual, sizeof(actual),
-					  &actual_len) == 0) {
-		fprintf(stderr, "missing certificate was accepted\n");
+					  &actual_len) == 0 ||
+	    actual_len != 0) {
+		fprintf(stderr, "missing certificate left a result\n");
 		goto done;
 	}
 	result = 0;
@@ -180,9 +188,11 @@ static int test_unsupported_certificate(const char *name)
 		goto done;
 	tls_ctx.flags = TLS_SERVER_CONN;
 	tls_ctx.ssl_conn = ssl;
+	actual_len = sizeof(actual);
 	if (tls_get_server_end_point_hash(&tls_ctx, actual, sizeof(actual),
-					  &actual_len) == 0) {
-		fprintf(stderr, "%s: unsupported signature algorithm was accepted\n", name);
+					  &actual_len) == 0 ||
+	    actual_len != 0) {
+		fprintf(stderr, "%s: unsupported signature algorithm left a result\n", name);
 		goto done;
 	}
 	result = 0;
@@ -221,7 +231,16 @@ int main(void)
 		return 1;
 	printf("TLS server end point test OK\n");
 #else
-	printf("TLS server end point test skipped (no TLS support)\n");
+	uint8_t actual[1];
+	size_t actual_len = sizeof(actual);
+
+	if (tls_get_server_end_point_hash(NULL, actual, sizeof(actual),
+					  &actual_len) == 0 ||
+	    actual_len != 0) {
+		fprintf(stderr, "TLS compatibility stub left a result\n");
+		return 1;
+	}
+	printf("TLS server end point compatibility stub test OK\n");
 #endif
 	return 0;
 }

@@ -1,6 +1,11 @@
 import base64
+import hashlib
 import shutil
 import ssl
+import struct
+import subprocess
+from dataclasses import dataclass
+from typing import Optional
 
 import pytest
 
@@ -21,8 +26,46 @@ GS2_Y = b"y,,"
 GS2_PLUS = b"p=tls-server-end-point,,"
 
 
+@dataclass(frozen=True)
+class ExchangeOutcome:
+    status: str
+    stage: str
+    category: Optional[str]
+
+
+class ReadSocket:
+    def __init__(self, data):
+        self.data = data
+
+    def recv(self, length):
+        result = self.data[:length]
+        self.data = self.data[length:]
+        return result
+
+
 def configure_scram(bouncer):
     bouncer.admin("set auth_type = 'scram-sha-256'")
+
+
+def test_invalid_server_message_length_is_protocol_failure():
+    client = ScramClient("localhost", 0)
+    client.sock = ReadSocket(b"R" + struct.pack("!I", 3))
+
+    with pytest.raises(ScramFailure, match="invalid message length") as exc_info:
+        client._read_message()
+
+    assert exc_info.value.category == "protocol"
+
+
+def test_truncated_authentication_payload_is_protocol_failure():
+    payload = b"\0\0\0"
+    client = ScramClient("localhost", 0)
+    client.sock = ReadSocket(b"R" + struct.pack("!I", len(payload) + 4) + payload)
+
+    outcome = client._read_authentication_outcome()
+
+    assert outcome.status == "rejected"
+    assert outcome.category == "protocol"
 
 
 def configure_tls_scram(bouncer, cert_dir):
@@ -52,11 +95,9 @@ def test_non_tls_advertises_only_ordinary(bouncer):
 def test_non_scram_auth_does_not_advertise_sasl(bouncer):
     bouncer.admin("set auth_type = 'plain'")
     client = ScramClient("127.0.0.1", bouncer.port)
-    try:
-        with pytest.raises(ScramFailure):
-            client.connect()
-    finally:
-        client.close()
+    with pytest.raises(ScramFailure):
+        client.connect()
+    assert client.sock is None
 
 
 @pytest.mark.skipif("not USE_UNIX_SOCKETS", reason="Unix sockets are unavailable")
@@ -146,6 +187,52 @@ def test_plus_auth_query_credentials(bouncer, cert_dir):
         ssl_context=context,
     ) as client:
         assert client.authenticate(PLUS, GS2_PLUS) == "accepted"
+
+
+def test_libpq_requires_plus_with_stored_verifier_passthrough(bouncer, cert_dir):
+    configure_tls_scram(bouncer, cert_dir)
+    bouncer.psql_test(
+        host="localhost",
+        user="scramuser1",
+        password="foo",
+        dbname="p62",
+        sslmode="verify-full",
+        sslrootcert=cert_dir / "TestCA1" / "ca.crt",
+        channel_binding="require",
+    )
+
+
+def test_libpq_requires_plus_with_auth_query(bouncer, cert_dir):
+    configure_tls_scram(bouncer, cert_dir)
+    bouncer.write_ini("auth_user = pswcheck")
+    bouncer.write_ini(
+        "auth_query = SELECT usename, passwd FROM pg_shadow where usename = $1"
+    )
+    bouncer.admin("reload")
+
+    bouncer.psql_test(
+        host="localhost",
+        user="someuser",
+        password="anypasswd",
+        dbname="authdb",
+        sslmode="verify-full",
+        sslrootcert=cert_dir / "TestCA1" / "ca.crt",
+        channel_binding="require",
+    )
+
+
+def test_libpq_requires_plus_rejects_nonexistent_user(bouncer, cert_dir):
+    configure_tls_scram(bouncer, cert_dir)
+    with pytest.raises(subprocess.CalledProcessError):
+        bouncer.psql_test(
+            host="localhost",
+            user="nosuchuser",
+            password="whatever",
+            dbname="p0",
+            sslmode="verify-full",
+            sslrootcert=cert_dir / "TestCA1" / "ca.crt",
+            channel_binding="require",
+        )
 
 
 def test_plus_mock_user_rejects_authentication(bouncer, cert_dir):
@@ -254,6 +341,17 @@ def test_plus_rejects_modified_certificate_hash(bouncer, cert_dir, change):
         assert client.finish(GS2_PLUS, channel_binding=channel_binding) == "rejected"
 
 
+def test_plus_rejects_binding_with_wrong_digest_algorithm(bouncer, cert_dir):
+    context = configure_tls_scram(bouncer, cert_dir)
+    with ScramClient(
+        "localhost", bouncer.port, use_tls=True, ssl_context=context
+    ) as client:
+        client.begin(PLUS, GS2_PLUS)
+        digest = hashlib.sha384(client.peer_certificate).digest()
+        channel_binding = base64.b64encode(GS2_PLUS + digest)
+        assert client.finish(GS2_PLUS, channel_binding=channel_binding) == "rejected"
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -338,13 +436,23 @@ def test_certificate_reload_preserves_connection_identity(bouncer, cert_dir):
             )
 
 
-def test_plus_accepts_extensions_in_exact_transcript(bouncer, cert_dir):
+@pytest.mark.parametrize(
+    "extensions",
+    [
+        b",x=one",
+        b",x=",
+        b",x=" + b"x" * 4096,
+        b",x=contains-p=marker",
+        b",x=one,y=two",
+    ],
+)
+def test_plus_accepts_extensions_in_exact_transcript(bouncer, cert_dir, extensions):
     context = configure_tls_scram(bouncer, cert_dir)
     with ScramClient(
         "localhost", bouncer.port, use_tls=True, ssl_context=context
     ) as client:
         client.begin(PLUS, GS2_PLUS)
-        assert client.finish(GS2_PLUS, extensions=b",x=one,y=two") == "accepted"
+        assert client.finish(GS2_PLUS, extensions=extensions) == "accepted"
 
 
 def test_plus_rejects_data_after_proof(bouncer, cert_dir):
@@ -365,6 +473,46 @@ def test_plus_rejects_incorrect_proof_lengths(bouncer, cert_dir, proof_length):
         client.begin(PLUS, GS2_PLUS)
         proof = base64.b64encode(b"x" * proof_length)
         assert client.finish(GS2_PLUS, proof=proof) == "rejected"
+
+
+@pytest.mark.parametrize("proof", [b"not-base64", b"====", b"AA=A"])
+def test_plus_rejects_malformed_proof_base64(bouncer, cert_dir, proof):
+    context = configure_tls_scram(bouncer, cert_dir)
+    with ScramClient(
+        "localhost", bouncer.port, use_tls=True, ssl_context=context
+    ) as client:
+        client.begin(PLUS, GS2_PLUS)
+        assert client.finish(GS2_PLUS, proof=proof) == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("packet_length", "accepted"), [(255, True), (256, True), (257, False)]
+)
+def test_plus_final_message_at_packet_limit(bouncer, cert_dir, packet_length, accepted):
+    context = configure_tls_scram(bouncer, cert_dir)
+    bouncer.admin("set max_packet_size = 256")
+    try:
+        with ScramClient(
+            "localhost", bouncer.port, use_tls=True, ssl_context=context
+        ) as client:
+            client.begin(PLUS, GS2_PLUS)
+            binding = base64.b64encode(GS2_PLUS + client.tls_server_end_point())
+            packet_overhead = len(
+                b"p"
+                + b"\0\0\0\0"
+                + b"c="
+                + binding
+                + b",r="
+                + client.server_nonce
+                + b",x="
+                + b",p="
+                + base64.b64encode(bytes(32))
+            )
+            extensions = b",x=" + b"x" * (packet_length - packet_overhead)
+            outcome = client.finish(GS2_PLUS, extensions=extensions)
+            assert (outcome == "accepted") is accepted
+    finally:
+        bouncer.admin("set max_packet_size = 2147483647")
 
 
 @pytest.mark.parametrize(
@@ -613,12 +761,14 @@ def test_channel_binding_differential_against_postgres(bouncer, pg, cert_dir):
             "name": "unknown-mechanism",
             "mechanism": b"SCRAM-SHA-256-UNKNOWN",
             "gs2_header": GS2_N,
+            "begin_stage": "mechanism",
         },
         {
             "name": "missing-mechanism-terminator",
             "mechanism": ORDINARY,
             "gs2_header": GS2_N,
             "begin_kwargs": {"mechanism_terminator": b""},
+            "begin_stage": "mechanism",
         },
         {
             "name": "short-initial-response",
@@ -751,6 +901,7 @@ def test_channel_binding_differential_against_postgres(bouncer, pg, cert_dir):
             "localhost", port, use_tls=True, ssl_context=context
         ) as client:
             mechanisms = client.mechanisms
+            stage = case.get("begin_stage", "client-first")
             try:
                 client.begin(
                     case["mechanism"],
@@ -758,6 +909,7 @@ def test_channel_binding_differential_against_postgres(bouncer, pg, cert_dir):
                     client_first_bare=case.get("client_first_bare"),
                     **case.get("begin_kwargs", {}),
                 )
+                stage = "client-final"
                 channel_binding = base64.b64encode(
                     case["gs2_header"] + client.tls_server_end_point()
                 )
@@ -836,13 +988,98 @@ def test_channel_binding_differential_against_postgres(bouncer, pg, cert_dir):
                     outcome = client.finish(case["gs2_header"], trailing=b"\0trailing")
                 else:
                     outcome = client.finish(case["gs2_header"])
-            except ScramFailure:
-                outcome = "rejected"
-            return mechanisms, outcome
+            except ScramFailure as exc:
+                result = ExchangeOutcome(
+                    "rejected",
+                    stage,
+                    exc.category,
+                )
+            else:
+                result = ExchangeOutcome(
+                    outcome,
+                    "client-final",
+                    client.last_outcome.category,
+                )
+            return mechanisms, result
 
     # PostgreSQL accepts a SASL initial-response length of -1, while PgBouncer
     # intentionally requires an initial response, so that case is excluded.
+    expected_category_differences = {
+        # PgBouncer's generic disconnect API reports its default 08P01.
+        "ordinary-y": ("authentication", "protocol"),
+        "channel-binding-missing-padding": ("authentication", "protocol"),
+        "channel-binding-extra-padding": ("authentication", "protocol"),
+        "channel-binding-malformed-base64": ("authentication", "protocol"),
+        "wrong-certificate-binding": ("authentication", "protocol"),
+        "repeated-final-nonce": ("authentication", "protocol"),
+    }
     for case in cases:
-        postgres_result = exchange(pg.port, case)
-        pgbouncer_result = exchange(bouncer.port, case)
-        assert pgbouncer_result == postgres_result, case["name"]
+        postgres_mechanisms, postgres_result = exchange(pg.port, case)
+        pgbouncer_mechanisms, pgbouncer_result = exchange(bouncer.port, case)
+        assert pgbouncer_mechanisms == postgres_mechanisms, case["name"]
+        assert pgbouncer_result.status == postgres_result.status, case["name"]
+        assert pgbouncer_result.stage == postgres_result.stage, case["name"]
+        # PgBouncer closes some malformed exchanges without an ErrorResponse.
+        # Compare the server-reported class whenever neither side collapsed the
+        # failure to a transport close.
+        categories = (postgres_result.category, pgbouncer_result.category)
+        if "transport" not in categories:
+            expected_difference = expected_category_differences.get(case["name"])
+            if expected_difference is not None:
+                assert categories == expected_difference, case["name"]
+            else:
+                assert categories[1] == categories[0], case["name"]
+
+
+@pytest.mark.parametrize(
+    "certificate_name", ["sha256", "sha384", "sha512", "sha1", "md5", "rsa-pss"]
+)
+def test_certificate_hash_matches_postgres(bouncer, pg, cert_dir, certificate_name):
+    if not TLS_SUPPORT:
+        pytest.skip("TLS support is unavailable")
+
+    channel_binding_certificate_dir = cert_dir / "channel-binding-oracle"
+    certificate = channel_binding_certificate_dir / f"{certificate_name}.crt"
+    key = channel_binding_certificate_dir / f"{certificate_name}.key"
+    expected_hash_file = channel_binding_certificate_dir / f"{certificate_name}.hex"
+    if not certificate.exists() or not key.exists() or not expected_hash_file.exists():
+        pytest.skip(f"{certificate_name} certificate generation is unavailable")
+
+    expected_hash = bytes.fromhex(expected_hash_file.read_text())
+    channel_binding = base64.b64encode(GS2_PLUS + expected_hash)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+
+    default_certificate = cert_dir / "TestCA1" / "sites" / "01-localhost.crt"
+    default_key = cert_dir / "TestCA1" / "sites" / "01-localhost.key"
+    try:
+        pg.sql(
+            "set password_encryption = 'scram-sha-256'; "
+            "alter user bouncer password 'zzzz'"
+        )
+        pg.ssl_access("p0", "scram-sha-256", user="bouncer")
+        pg.configure("ssl=on")
+        pg.configure(f"ssl_cert_file='{certificate}'")
+        pg.configure(f"ssl_key_file='{key}'")
+        pg.reload()
+
+        bouncer.write_ini(f"client_tls_key_file = {key}")
+        bouncer.write_ini(f"client_tls_cert_file = {certificate}")
+        bouncer.write_ini("client_tls_sslmode = require")
+        bouncer.write_ini("auth_type = scram-sha-256")
+        bouncer.admin("reload")
+
+        for port in (pg.port, bouncer.port):
+            with ScramClient(
+                "localhost", port, use_tls=True, ssl_context=context
+            ) as client:
+                client.begin(PLUS, GS2_PLUS)
+                assert (
+                    client.finish(GS2_PLUS, channel_binding=channel_binding)
+                    == "accepted"
+                ), certificate_name
+    finally:
+        pg.configure(f"ssl_cert_file='{default_certificate}'")
+        pg.configure(f"ssl_key_file='{default_key}'")
+        pg.reload()

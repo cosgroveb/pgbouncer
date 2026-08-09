@@ -598,6 +598,8 @@ struct tls *tls_server(void)
 int tls_get_server_end_point_hash(struct tls *_ctx, uint8_t *_result,
 				  size_t _result_size, size_t *_result_len)
 {
+	if (_result_len != NULL)
+		*_result_len = 0;
 	return -1;
 }
 int tls_configure(struct tls *_ctx, struct tls_config *_config)

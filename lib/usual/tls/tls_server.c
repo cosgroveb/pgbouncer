@@ -65,6 +65,8 @@ int tls_get_server_end_point_hash(struct tls *ctx, uint8_t *result,
 #endif
 	unsigned int len;
 
+	if (result_len != NULL)
+		*result_len = 0;
 	if (ctx == NULL || (ctx->flags & TLS_SERVER_CONN) == 0 ||
 	    ctx->ssl_conn == NULL) {
 		if (ctx != NULL)

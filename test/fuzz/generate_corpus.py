@@ -43,9 +43,11 @@ ordinary_final = b"c=biws,r=nonce,p=" + PROOF
 plus_final = b"c=" + PLUS_BINDING + b",r=nonce,p=" + PROOF
 client_final = {
     "bad_binding": PLUS + b"c=not-base64,r=nonce,p=" + PROOF,
+    "empty_extension": ORDINARY + b"c=biws,r=nonce,x=,p=" + PROOF,
     "embedded_nul": ORDINARY + b"c=biws,r=nonce\0,p=" + PROOF,
     "extensions": ORDINARY + b"c=biws,r=nonce,x=one,y=two,p=" + PROOF,
     "malformed": PLUS + b"c=not-base64,r=,p=",
+    "malformed_proof": ORDINARY + b"c=biws,r=nonce,p=not-base64",
     "missing_binding": PLUS + b"r=nonce,p=" + PROOF,
     "ordinary": ORDINARY + ordinary_final,
     "oversized_extension": ORDINARY
@@ -54,6 +56,9 @@ client_final = {
     + b",p="
     + PROOF,
     "plus": PLUS + plus_final,
+    "proof_marker_extension": ORDINARY
+    + b"c=biws,r=nonce,x=contains-p=marker,p="
+    + PROOF,
     "trailing": PLUS + plus_final + b",x=after",
     "trunc_binding_equals": ORDINARY + b"c=",
     "trunc_binding_name": ORDINARY + b"c",

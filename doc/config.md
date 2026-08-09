@@ -471,7 +471,8 @@ scram-sha-256
     `SCRAM-SHA-256-PLUS`, while `channel_binding=disable` selects
     `SCRAM-SHA-256`. Clients using `channel_binding=require` fail to connect
     without TLS or if channel binding is unavailable. PgBouncer has no setting
-    to disable or require channel binding; clients enforce their own policy.
+    to enable, disable, or require channel binding; clients enforce their own
+    policy.
 
     Existing SCRAM verifiers and plain-text passwords do not need to be
     changed. Channel binding protects the client-to-PgBouncer TLS connection.

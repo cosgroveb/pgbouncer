@@ -3,6 +3,16 @@
 set -eu
 
 output_dir="$(dirname "$0")/channel-binding"
+keep_keys=0
+
+if test "${1-}" = --with-keys; then
+	if test "$#" -ne 2; then
+		echo "usage: $0 --with-keys OUTPUT_DIR" >&2
+		exit 1
+	fi
+	output_dir=$2
+	keep_keys=1
+fi
 
 certificate_hash()
 {
@@ -44,27 +54,52 @@ fi
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/pgbouncer-channel-binding.XXXXXX")
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
-rm -rf "$output_dir"
-mkdir -p "$output_dir"
+if test "$keep_keys" -eq 1; then
+	if test -e "$output_dir"; then
+		echo "$output_dir already exists" >&2
+		exit 1
+	fi
+	mkdir -p "$output_dir"
+else
+	rm -rf "$output_dir"
+	mkdir -p "$output_dir"
+fi
 
-for digest in sha256 sha384 sha512 sha1 md5; do
+key_dir=$tmp_dir
+if test "$keep_keys" -eq 1; then
+	key_dir=$output_dir
+fi
+
+for digest in sha256 sha384 sha512; do
+	key_file="$key_dir/$digest.key"
 	openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
 		-subj "/CN=PgBouncer channel binding $digest" \
 		-"$digest" \
-		-keyout "$tmp_dir/$digest.key" \
+		-keyout "$key_file" \
 		-out "$output_dir/$digest.crt" >/dev/null 2>&1
-	selected_digest=$digest
-	case "$digest" in
-	md5|sha1) selected_digest=sha256 ;;
-	esac
-	certificate_hash "$output_dir/$digest.crt" "$selected_digest" \
+	certificate_hash "$output_dir/$digest.crt" "$digest" \
 		> "$output_dir/$digest.hex"
 done
 
+for digest in sha1 md5; do
+	key_file="$key_dir/$digest.key"
+	if openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
+		-subj "/CN=PgBouncer channel binding $digest" \
+		-"$digest" \
+		-keyout "$key_file" \
+		-out "$output_dir/$digest.crt" >/dev/null 2>&1; then
+		certificate_hash "$output_dir/$digest.crt" sha256 \
+			> "$output_dir/$digest.hex"
+	else
+		echo "OpenSSL cannot generate a $digest certificate; skipping" >&2
+	fi
+done
+
+key_file="$key_dir/rsa-pss.key"
 if openssl req -new -x509 -newkey rsa:2048 -nodes -days 3650 \
 	-subj "/CN=PgBouncer channel binding RSA-PSS" \
 	-sha256 -sigopt rsa_padding_mode:pss \
-	-keyout "$tmp_dir/rsa-pss.key" \
+	-keyout "$key_file" \
 	-out "$output_dir/rsa-pss.crt" >/dev/null 2>&1; then
 	certificate_hash "$output_dir/rsa-pss.crt" sha256 \
 		> "$output_dir/rsa-pss.hex"
@@ -72,9 +107,10 @@ else
 	echo "OpenSSL cannot generate an RSA-PSS certificate; skipping" >&2
 fi
 
+key_file="$key_dir/ed25519.key"
 if ! openssl req -new -x509 -newkey ed25519 -nodes -days 3650 \
 	-subj "/CN=PgBouncer channel binding unsupported signature" \
-	-keyout "$tmp_dir/ed25519.key" \
+	-keyout "$key_file" \
 	-out "$output_dir/ed25519.crt" >/dev/null 2>&1; then
 	echo "OpenSSL cannot generate an Ed25519 certificate; skipping" >&2
 fi

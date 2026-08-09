@@ -56,6 +56,14 @@ def create_certs(cert_dir):
     cert_dir.mkdir()
     shutil.move(TEST_DIR / "ssl" / "TestCA1", cert_dir / "TestCA1")
     shutil.move(TEST_DIR / "ssl" / "TestCA2", cert_dir / "TestCA2")
+    run(
+        [
+            TEST_DIR / "ssl" / "create_channel_binding_certs.sh",
+            "--with-keys",
+            cert_dir / "channel-binding-oracle",
+        ],
+        silent=True,
+    )
 
 
 @pytest.fixture(autouse=True, scope="session", name="cert_dir")
