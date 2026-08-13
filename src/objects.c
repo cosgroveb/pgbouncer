@@ -1449,6 +1449,16 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 		log_noise("sbuf_close failed, retry later");
 }
 
+void disconnect_server_and_advance_host(PgSocket *server, const char *reason)
+{
+	PgPool *pool = server->pool;
+	bool used_sticky_dns = server->used_dns && pool_uses_dns_selection(pool);
+
+	disconnect_server(server, true, "%s", reason);
+	if (used_sticky_dns)
+		advance_pool_host(pool);
+}
+
 /*
  * A wrapper around disconnect_client_sqlstate()
  *

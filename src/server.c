@@ -268,7 +268,7 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 				server->link->link = NULL;
 				server->link = NULL;
 			}
-			disconnect_server(server, true, "server does not satisfy target_session_attrs");
+			disconnect_server_and_advance_host(server, "server does not satisfy target_session_attrs");
 			if (had_login_failure)
 				safe_strcpy(pool->last_connect_failed_message, last_connect_failed_message, sizeof(pool->last_connect_failed_message));
 

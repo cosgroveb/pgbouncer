@@ -212,6 +212,69 @@ def test_target_session_attrs_read_only_primary(bouncer, pg):
     PG_MAJOR_VERSION < 14,
     reason="default_transaction_read_only was not reported before PostgreSQL 14",
 )
+def test_dns_target_mismatch_skips_remaining_addresses(
+    bouncer, dns_hosts_file, loopback_pg
+):
+    hostname = dns_hosts_file.names["multi"]
+    config = bouncer.config_with_databases(
+        {
+            "tsa_dns_skip_addresses": (
+                f"host={hostname},127.0.0.1 port={bouncer.pg.port} "
+                "dbname=p0 user=bouncer load_balance_hosts=disable "
+                "target_session_attrs=read-write"
+            ),
+        }
+    ).replace("[pgbouncer]\n", "[pgbouncer]\nserver_login_retry = 1\n", 1)
+
+    with bouncer.run_with_config(config):
+        with bouncer.log_contains(
+            r"127\.0\.0\.[23]:\d+ closing because: "
+            r"server does not satisfy target_session_attrs",
+            times=1,
+        ):
+            address = bouncer.sql_value(
+                "SELECT host(inet_server_addr())",
+                dbname="tsa_dns_skip_addresses",
+                connect_timeout=10,
+            )
+
+    assert address == "127.0.0.1"
+
+
+@pytest.mark.skipif(
+    PG_MAJOR_VERSION < 14,
+    reason="default_transaction_read_only was not reported before PostgreSQL 14",
+)
+def test_literal_target_mismatch_advances_one_host(bouncer, loopback_pg):
+    config = bouncer.config_with_databases(
+        {
+            "tsa_literal_advance_once": (
+                f"host=127.0.0.2,127.0.0.1 port={bouncer.pg.port} "
+                "dbname=p0 user=bouncer load_balance_hosts=disable "
+                "target_session_attrs=read-write"
+            ),
+        }
+    ).replace("[pgbouncer]\n", "[pgbouncer]\nserver_login_retry = 1\n", 1)
+
+    with bouncer.run_with_config(config):
+        with bouncer.log_contains(
+            r"127\.0\.0\.2:\d+ closing because: "
+            r"server does not satisfy target_session_attrs",
+            times=1,
+        ):
+            address = bouncer.sql_value(
+                "SELECT host(inet_server_addr())",
+                dbname="tsa_literal_advance_once",
+                connect_timeout=10,
+            )
+
+    assert address == "127.0.0.1"
+
+
+@pytest.mark.skipif(
+    PG_MAJOR_VERSION < 14,
+    reason="default_transaction_read_only was not reported before PostgreSQL 14",
+)
 def test_target_session_attrs_observes_connect_query(bouncer):
     with bouncer.conn(dbname="tsa_connect_query", connect_timeout=10) as conn:
         assert conn.execute("SELECT pg_is_in_recovery()").fetchone() == (False,)
