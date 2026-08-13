@@ -712,6 +712,7 @@ static PgPool *new_pool(PgDatabase *db, PgCredentials *user_credentials)
 	pool->user_credentials = user_credentials;
 	pool->db = db;
 	pool->last_active_time = get_cached_time();
+	adns_selection_reset(&pool->dns_selection);
 
 	statlist_init(&pool->active_client_list, "active_client_list");
 	statlist_init(&pool->waiting_client_list, "waiting_client_list");
@@ -754,6 +755,7 @@ static PgPool *new_peer_pool(PgDatabase *db)
 	pool->orig_vars.var_list = slab_alloc(var_list_cache);
 
 	pool->db = db;
+	adns_selection_reset(&pool->dns_selection);
 
 	statlist_init(&pool->new_server_list, "new_server_list");
 	statlist_init(&pool->waiting_cancel_req_list, "waiting_cancel_req_list");
@@ -1201,6 +1203,12 @@ bool life_over(PgSocket *server)
 	return false;
 }
 
+static bool pool_uses_dns_selection(PgPool *pool)
+{
+	return !pool->db->peer_id &&
+	       pool->db->load_balance_hosts == LOAD_BALANCE_HOSTS_DISABLE;
+}
+
 /* connecting/active -> idle, unlink if needed */
 bool release_server(PgSocket *server)
 {
@@ -1236,6 +1244,8 @@ bool release_server(PgSocket *server)
 	case SV_TESTED:
 		break;
 	case SV_LOGIN:
+		if (server->used_dns && pool_uses_dns_selection(pool))
+			adns_selection_succeeded(&pool->dns_selection);
 		pool->last_login_failed = false;
 		pool->last_connect_failed = false;
 		break;
@@ -1383,6 +1393,14 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 			server->pool->last_login_failed = true;
 			server->pool->last_connect_failed = true;
 			safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
+			if (server->pool->db->load_balance_hosts == LOAD_BALANCE_HOSTS_DISABLE) {
+				if (server->used_dns && pool_uses_dns_selection(server->pool)) {
+					if (server->pool->dns_selection.current_valid)
+						adns_selection_failed(&server->pool->dns_selection);
+				} else {
+					advance_pool_host(server->pool);
+				}
+			}
 		} else
 		{
 			/*
@@ -1635,19 +1653,35 @@ static void connect_server(struct PgSocket *server, const struct sockaddr *sa, i
 		log_noise("failed to launch new connection");
 }
 
-static void dns_callback(void *arg, const struct sockaddr *sa, int salen)
+static void dns_connect(struct PgSocket *server);
+
+static void dns_callback(void *arg, enum DNSResolveResult result,
+			 const struct sockaddr *sa, int salen)
 {
 	struct PgSocket *server = arg;
-	struct PgDatabase *db = server->pool->db;
+	struct PgPool *pool = server->pool;
+	struct PgDatabase *db = pool->db;
 	struct sockaddr_in sa_in;
 	struct sockaddr_in6 sa_in6;
 
 	server->dns_token = NULL;
+	server->used_dns = true;
 
-	if (!sa) {
-		disconnect_server(server, true, "server DNS lookup failed");
+	if (result == DNS_RESOLVE_EXHAUSTED) {
+		advance_pool_host(pool);
+		free(server->host);
+		server->host = NULL;
+		dns_connect(server);
 		return;
-	} else if (sa->sa_family == AF_INET) {
+	}
+	if (result == DNS_RESOLVE_FAILED) {
+		disconnect_server(server, true, "server DNS lookup failed");
+		if (pool_uses_dns_selection(pool))
+			advance_pool_host(pool);
+		return;
+	}
+
+	if (sa->sa_family == AF_INET) {
 		char buf[64];
 		memcpy(&sa_in, sa, sizeof(sa_in));
 		sa_in.sin_port = htons(db->port);
@@ -1671,6 +1705,39 @@ static void dns_callback(void *arg, const struct sockaddr *sa, int salen)
 	connect_server(server, sa, salen);
 }
 
+static const char *select_pool_host(PgPool *pool, char **host_copy,
+				    uint16_t *host_index)
+{
+	PgDatabase *db = pool->db;
+	const char *host;
+
+	*host_index = 0;
+	if (db->host && strchr(db->host, ',')) {
+		int count = 1;
+		int n;
+
+		for (const char *p = db->host; *p; p++)
+			if (*p == ',')
+				count++;
+
+		*host_copy = xstrdup(db->host);
+		for (host = strtok(*host_copy, ","), n = 0; host; host = strtok(NULL, ","), n++) {
+			if (pool->rrcounter % count == n) {
+				*host_index = n;
+				break;
+			}
+		}
+		Assert(host);
+
+		if (db->load_balance_hosts == LOAD_BALANCE_HOSTS_ROUND_ROBIN)
+			pool->rrcounter++;
+	} else {
+		host = db->host;
+	}
+
+	return host;
+}
+
 static void dns_connect(struct PgSocket *server)
 {
 	struct sockaddr_un sa_un;
@@ -1682,30 +1749,10 @@ static void dns_connect(struct PgSocket *server)
 	int sa_len;
 	int res;
 	char *host_copy = NULL;
+	uint16_t host_index;
 
-	/* host list? */
-	if (db->host && strchr(db->host, ',')) {
-		int count = 1;
-		int n;
-
-		if (server->pool->db->load_balance_hosts == LOAD_BALANCE_HOSTS_DISABLE && server->pool->last_connect_failed)
-			server->pool->rrcounter++;
-
-		for (const char *p = db->host; *p; p++)
-			if (*p == ',')
-				count++;
-
-		host_copy = xstrdup(db->host);
-		for (host = strtok(host_copy, ","), n = 0; host; host = strtok(NULL, ","), n++)
-			if (server->pool->rrcounter % count == n)
-				break;
-		Assert(host);
-
-		if (server->pool->db->load_balance_hosts == LOAD_BALANCE_HOSTS_ROUND_ROBIN)
-			server->pool->rrcounter++;
-	} else {
-		host = db->host;
-	}
+	server->used_dns = false;
+	host = select_pool_host(server->pool, &host_copy, &host_index);
 
 	if (host) {
 		server->host = xstrdup(host);
@@ -1759,9 +1806,19 @@ static void dns_connect(struct PgSocket *server)
 	/* if simple parse failed, use DNS */
 	if (res != 1) {
 		struct DNSToken *tk;
+		struct DNSAddrSelection *selection = NULL;
 		slog_noise(server, "dns socket: %s", host);
+		if (pool_uses_dns_selection(server->pool)) {
+			if (!server->pool->dns_selection_host_valid ||
+			    server->pool->dns_selection_host != host_index) {
+				adns_selection_reset(&server->pool->dns_selection);
+				server->pool->dns_selection_host = host_index;
+				server->pool->dns_selection_host_valid = true;
+			}
+			selection = &server->pool->dns_selection;
+		}
 		/* launch dns lookup */
-		tk = adns_resolve(adns, host, dns_callback, server);
+		tk = adns_resolve(adns, host, selection, dns_callback, server);
 		if (tk)
 			server->dns_token = tk;
 		goto cleanup;
@@ -2526,6 +2583,14 @@ static void tag_dirty(PgSocket *sk)
 	sk->close_needed = true;
 }
 
+void advance_pool_host(PgPool *pool)
+{
+	if (pool->db->load_balance_hosts == LOAD_BALANCE_HOSTS_DISABLE)
+		pool->rrcounter++;
+	pool->dns_selection_host_valid = false;
+	adns_selection_reset(&pool->dns_selection);
+}
+
 void tag_pool_dirty(PgPool *pool)
 {
 	struct List *item, *tmp;
@@ -2554,6 +2619,7 @@ void tag_pool_dirty(PgPool *pool)
 		server = container_of(item, PgSocket, head);
 		disconnect_server(server, true, "connect string changed");
 	}
+	adns_selection_reset(&pool->dns_selection);
 }
 
 void tag_database_dirty(PgDatabase *db)

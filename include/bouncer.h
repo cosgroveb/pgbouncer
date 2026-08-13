@@ -335,6 +335,16 @@ const char *pga_str(const PgAddr *a, char *dst, int dstlen);
 const char *pga_details(const PgAddr *a, char *dst, int dstlen);
 int pga_cmp_addr(const PgAddr *a, const PgAddr *b);
 
+struct DNSAddrSelection {
+	PgAddr preferred;
+	PgAddr current;
+	PgAddr cycle_start;
+	bool preferred_valid;
+	bool current_valid;
+	bool cycle_start_valid;
+	bool advance;
+};
+
 /*
  * Stats, kept per-pool.
  */
@@ -491,6 +501,9 @@ struct PgPool {
 	bool welcome_msg_ready : 1;
 
 	uint16_t rrcounter;		/* round-robin counter */
+	struct DNSAddrSelection dns_selection;
+	uint16_t dns_selection_host;
+	bool dns_selection_host_valid : 1;
 };
 
 /*
@@ -721,6 +734,7 @@ struct PgSocket {
 
 	bool contributes_db_client_count : 1;
 	bool user_connection_counted : 1;
+	bool used_dns : 1;
 
 	bool ready : 1;			/* server: accepts new query */
 	bool idle_tx : 1;		/* server: idling in tx */

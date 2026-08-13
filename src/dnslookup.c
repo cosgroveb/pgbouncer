@@ -59,6 +59,7 @@
  */
 struct DNSToken {
 	struct List node;
+	struct DNSAddrSelection *selection;
 	adns_callback_f cb_func;
 	void *cb_arg;
 };
@@ -123,6 +124,25 @@ static void zone_init(struct DNSContext *ctx);
 static void zone_free(struct DNSContext *ctx);
 
 static void got_zone_serial(struct DNSContext *ctx, uint32_t *serial);
+
+void adns_selection_reset(struct DNSAddrSelection *selection)
+{
+	memset(selection, 0, sizeof(*selection));
+}
+
+void adns_selection_failed(struct DNSAddrSelection *selection)
+{
+	selection->advance = true;
+}
+
+void adns_selection_succeeded(struct DNSAddrSelection *selection)
+{
+	selection->preferred = selection->current;
+	selection->preferred_valid = selection->current_valid;
+	selection->cycle_start = selection->current;
+	selection->cycle_start_valid = selection->current_valid;
+	selection->advance = false;
+}
 
 /*
  * Custom addrinfo generation
@@ -743,12 +763,109 @@ static int impl_query_soa_serial(struct DNSContext *ctx, const char *zonename)
  * Generic framework
  */
 
+static bool addrinfo_matches(const PgAddr *addr, const struct addrinfo *ai)
+{
+	PgAddr ai_addr;
+
+	memset(&ai_addr, 0, sizeof(ai_addr));
+	pga_copy(&ai_addr, ai->ai_addr);
+	return pga_cmp_addr(addr, &ai_addr) == 0;
+}
+
+static const struct addrinfo *find_addrinfo(const struct addrinfo *result,
+					    const PgAddr *addr)
+{
+	const struct addrinfo *ai;
+
+	for (ai = result; ai; ai = ai->ai_next)
+		if (addrinfo_matches(addr, ai))
+			return ai;
+	return NULL;
+}
+
+static void select_addrinfo(struct DNSAddrSelection *selection,
+			    const struct addrinfo *ai)
+{
+	pga_copy(&selection->current, ai->ai_addr);
+	selection->current_valid = true;
+	if (!selection->cycle_start_valid) {
+		selection->cycle_start = selection->current;
+		selection->cycle_start_valid = true;
+	}
+}
+
+static const struct addrinfo *next_unique_addrinfo(const struct addrinfo *result,
+						   const struct addrinfo *current)
+{
+	const struct addrinfo *ai = current;
+	PgAddr addr;
+
+	do {
+		ai = ai->ai_next ? ai->ai_next : result;
+		memset(&addr, 0, sizeof(addr));
+		pga_copy(&addr, ai->ai_addr);
+	} while (find_addrinfo(result, &addr) != ai);
+
+	return ai;
+}
+
+static const struct addrinfo *select_addr(struct DNSRequest *req,
+					  struct DNSAddrSelection *selection,
+					  enum DNSResolveResult *result)
+{
+	const struct addrinfo *ai = NULL;
+
+	*result = DNS_RESOLVE_SUCCESS;
+	if (!req->result) {
+		*result = DNS_RESOLVE_FAILED;
+		return NULL;
+	}
+
+	if ((selection->preferred_valid &&
+	     !find_addrinfo(req->result, &selection->preferred)) ||
+	    (selection->cycle_start_valid &&
+	     !find_addrinfo(req->result, &selection->cycle_start))) {
+		adns_selection_reset(selection);
+	}
+
+	if (!selection->advance) {
+		if (selection->preferred_valid)
+			ai = find_addrinfo(req->result, &selection->preferred);
+		if (!ai) {
+			adns_selection_reset(selection);
+			ai = req->result;
+		}
+	} else {
+		if (selection->current_valid)
+			ai = find_addrinfo(req->result, &selection->current);
+		if (!ai && selection->preferred_valid)
+			ai = find_addrinfo(req->result, &selection->preferred);
+		if (!ai) {
+			adns_selection_reset(selection);
+			ai = req->result;
+		} else {
+			ai = next_unique_addrinfo(req->result, ai);
+			if (selection->cycle_start_valid &&
+			    addrinfo_matches(&selection->cycle_start, ai)) {
+				*result = DNS_RESOLVE_EXHAUSTED;
+				return NULL;
+			}
+		}
+	}
+
+	select_addrinfo(selection, ai);
+	return ai;
+}
+
 static void deliver_info(struct DNSRequest *req)
 {
 	struct DNSContext *ctx = req->ctx;
 	struct DNSToken *ucb;
 	struct List *el;
-	const struct addrinfo *ai = req->current;
+	const struct addrinfo *ai;
+	const struct addrinfo *round_robin_ai = req->current;
+	enum DNSResolveResult result;
+	bool round_robin_delivered = false;
 	char sabuf[128];
 
 	ctx->active--;
@@ -756,24 +873,30 @@ static void deliver_info(struct DNSRequest *req)
 loop:
 	/* get next req */
 	el = list_pop(&req->ucb_list);
-	if (!el)
+	if (!el) {
+		if (round_robin_delivered)
+			req->current = round_robin_ai->ai_next ? round_robin_ai->ai_next : req->result;
 		return;
+	}
 	ucb = container_of(el, struct DNSToken, node);
 
 	/* launch callback */
+	if (ucb->selection) {
+		ai = select_addr(req, ucb->selection, &result);
+	} else if (round_robin_ai) {
+		ai = round_robin_ai;
+		result = DNS_RESOLVE_SUCCESS;
+		round_robin_delivered = true;
+	} else {
+		ai = NULL;
+		result = DNS_RESOLVE_FAILED;
+	}
 	log_noise("dns: deliver_info(%s) addr=%s", req->name,
 		  ai ? sa2str(ai->ai_addr, sabuf, sizeof(sabuf)) : "NULL");
-	ucb->cb_func(ucb->cb_arg,
+	ucb->cb_func(ucb->cb_arg, result,
 		     ai ? ai->ai_addr : NULL,
 		     ai ? ai->ai_addrlen : 0);
 	free(ucb);
-
-	/* scroll req list */
-	if (ai) {
-		req->current = ai->ai_next;
-		if (!req->current)
-			req->current = req->result;
-	}
 
 	goto loop;
 }
@@ -847,7 +970,9 @@ void adns_free_context(struct DNSContext *ctx)
 	}
 }
 
-struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name, adns_callback_f cb_func, void *cb_arg)
+struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name,
+			      struct DNSAddrSelection *selection,
+			      adns_callback_f cb_func, void *cb_arg)
 {
 	int namelen = strlen(name);
 	struct DNSRequest *req;
@@ -885,6 +1010,7 @@ struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name, adns_cal
 	if (!ucb)
 		goto nomem;
 	list_init(&ucb->node);
+	ucb->selection = selection;
 	ucb->cb_func = cb_func;
 	ucb->cb_arg = cb_arg;
 	list_append(&req->ucb_list, &ucb->node);
@@ -904,7 +1030,7 @@ struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name, adns_cal
 	return req->done ? NULL : ucb;
 nomem:
 	log_warning("dns(%s): req failed, no mem", name);
-	cb_func(cb_arg, NULL, 0);
+	cb_func(cb_arg, DNS_RESOLVE_FAILED, NULL, 0);
 	return NULL;
 }
 

@@ -1311,6 +1311,14 @@ class Bouncer(QueryRunner):
                 f.write(config_old)
             self.admin("RELOAD")
 
+    def config_with_databases(self, entries):
+        config = self.ini_path.read_text()
+        marker = "[databases]\n"
+        database_lines = "".join(
+            f"{name} = {value}\n" for name, value in entries.items()
+        )
+        return config.replace(marker, marker + database_lines, 1)
+
 
 class OpenLDAP:
     def __init__(self, config_dir):

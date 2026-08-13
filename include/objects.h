@@ -103,6 +103,7 @@ int get_active_client_count(void);
 int get_active_server_count(void);
 
 void tag_pool_dirty(PgPool *pool);
+void advance_pool_host(PgPool *pool);
 void tag_database_dirty(PgDatabase *db);
 void tag_autodb_dirty(void);
 void tag_host_addr_dirty(const char *host, const struct sockaddr *sa);

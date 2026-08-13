@@ -20,13 +20,28 @@ struct DNSContext;
 struct DNSToken;
 struct addrinfo;
 
-typedef void (*adns_callback_f)(void *arg, const struct sockaddr *sa, int salen);
+enum DNSResolveResult {
+	DNS_RESOLVE_SUCCESS,
+	DNS_RESOLVE_EXHAUSTED,
+	DNS_RESOLVE_FAILED,
+};
+
+struct DNSAddrSelection;
+
+void adns_selection_reset(struct DNSAddrSelection *selection);
+void adns_selection_failed(struct DNSAddrSelection *selection);
+void adns_selection_succeeded(struct DNSAddrSelection *selection);
+
+typedef void (*adns_callback_f)(void *arg, enum DNSResolveResult result,
+				const struct sockaddr *sa, int salen);
 
 struct DNSContext *adns_create_context(void);
 void adns_reload(struct DNSContext *ctx);
 void adns_free_context(struct DNSContext *ctx);
 
-struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name, adns_callback_f cb_func, void *arg);
+struct DNSToken *adns_resolve(struct DNSContext *ctx, const char *name,
+			      struct DNSAddrSelection *selection,
+			      adns_callback_f cb_func, void *arg);
 
 void adns_cancel(struct DNSContext *ctx, struct DNSToken *tk);
 

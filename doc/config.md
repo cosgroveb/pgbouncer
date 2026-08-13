@@ -1272,19 +1272,18 @@ at connection time, the result is cached per `dns_max_ttl` parameter.
 When a host name's resolution changes, existing server connections are
 automatically closed when they are released (according to the pooling
 mode), and new server connections immediately use the new resolution.
-If DNS returns several results, they are used in a round-robin
-manner.
+If DNS returns several results, `load_balance_hosts=round-robin` rotates
+through them.  `load_balance_hosts=disable` retains a successful result until
+a connection fails or DNS no longer returns that address.
 
 If the value begins with `/`, then a Unix socket in the file-system
 namespace is used.  If the value begins with `@`, then a Unix socket
 in the abstract namespace is used.
 
 A comma-separated list of host names or addresses can be specified.
-In that case, connections are made in a round-robin manner.  (If a
-host list contains host names that in turn resolve via DNS to multiple
-addresses, the round-robin systems operate independently.  This is an
-implementation dependency that is subject to change.)  Note that in a
-list, all hosts must be available at all times: There are no
+`load_balance_hosts` controls selection from this list and from the addresses
+returned for each host name.  Note that in a list, all hosts must be available
+at all times: There are no
 mechanisms to skip unreachable hosts or to select only available hosts
 from a list or similar.  (This is different from what a host list in
 libpq means.)  Also note that this only affects how the destinations
@@ -1378,21 +1377,18 @@ If not set, the user or default `query_wait_timeout` is used.
 
 ### load_balance_hosts
 
-When a comma-separated list is specified in `host`, `load_balance_hosts` controls
-which entry is chosen for a new connection.
-
-Note: This setting currently only controls the load balancing behaviour when
-providing multiple hosts in the connection string, but not when a single host
-its DNS record references multiple IP addresses. This is a missing feature, so
-in a future release this setting might start to to control both methods of load
-balancing.
+When a configured host name resolves to multiple addresses,
+`load_balance_hosts` applies to those addresses as well as to entries in the
+configured host list.
 
 round-robin
-:   A new connection attempt chooses the next host entry in the list.
+:   A new connection attempt chooses the next host entry and the next address
+    returned for that host name.
 
 disable
-:   A new connection continues using the same host entry until a connection
-    fails, after which the next host entry is chosen.
+:   New connections continue using the same host entry and resolved address
+    until a connection fails.  PgBouncer then tries the next address for that
+    host name and, after those addresses are exhausted, the next host entry.
 
 It is recommended to set `server_login_retry` lower than the default to ensure
 fast retries when multiple hosts are available.

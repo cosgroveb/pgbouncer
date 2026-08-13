@@ -1,5 +1,7 @@
 import os
 import shutil
+from dataclasses import dataclass
+from pathlib import Path
 
 import filelock
 import pytest
@@ -19,6 +21,70 @@ from .utils import (
     run,
     sudo,
 )
+
+
+@dataclass
+class HostsFile:
+    saved: Path
+    replacement: Path
+    names: dict[str, str]
+
+    def replace(self, records):
+        contents = self.saved.read_text()
+        for name, addresses in records.items():
+            contents += "".join(f"{address} {name}\n" for address in addresses)
+        self.replacement.write_text(contents)
+        sudo(["cp", self.replacement, "/etc/hosts"])
+
+
+@pytest.fixture
+def dns_hosts_file(tmp_path, worker_id):
+    if not LINUX or not USE_SUDO:
+        pytest.skip("requires Linux and USE_SUDO=1")
+
+    with filelock.FileLock("/tmp/pgbouncer-etc-hosts.lock"):
+        saved = tmp_path / "hosts"
+        replacement = tmp_path / "hosts-replacement"
+        sudo(["cp", "/etc/hosts", saved])
+        hosts = HostsFile(
+            saved=saved,
+            replacement=replacement,
+            names={"multi": f"pgbouncer-multi-{worker_id}"},
+        )
+        try:
+            hosts.replace(
+                {
+                    hosts.names["multi"]: ["127.0.0.2", "127.0.0.3"],
+                }
+            )
+            yield hosts
+        finally:
+            sudo(["cp", saved, "/etc/hosts"])
+
+
+@pytest.fixture
+def loopback_pg(pg, tmp_path):
+    loopback_pg = Postgres(tmp_path / "pgdata-loopback")
+    loopback_pg.port_lock.release()
+    loopback_pg.host = "127.0.0.2"
+    loopback_pg.port = pg.port
+    loopback_pg.initdb()
+    with loopback_pg.conf_path.open("a") as pgconf:
+        pgconf.write("listen_addresses = '127.0.0.2,127.0.0.3'\n")
+        pgconf.write("unix_socket_directories = ''\n")
+    loopback_pg.nossl_access("all", "trust")
+    loopback_pg.commit_hba()
+    loopback_pg.start()
+    loopback_pg.sql("create database p0")
+    loopback_pg.sql("create user bouncer")
+    loopback_pg.stop()
+    with loopback_pg.conf_path.open("a") as pgconf:
+        pgconf.write("default_transaction_read_only = on\n")
+    loopback_pg.start()
+    try:
+        yield loopback_pg
+    finally:
+        loopback_pg.stop()
 
 
 def add_qdisc():
