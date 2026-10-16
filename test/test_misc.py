@@ -1116,6 +1116,59 @@ async def test_unreported_param_reset_query(bouncer, reset_query):
         assert cur.execute("SHOW enable_seqscan").fetchone()[0] == "on"
 
 
+@pytest.mark.parametrize(
+    "reset_query,next_role,expected_user",
+    [
+        pytest.param("RESET ALL", None, "pswcheck", id="reset-all"),
+        pytest.param("DISCARD ALL", None, "pswcheck", id="discard-all"),
+        pytest.param(
+            "RESET ALL; RESET ROLE",
+            "someuser",
+            "someuser",
+            id="reset-role-after-reset-all",
+        ),
+        pytest.param(
+            "RESET ALL; SET ROLE bouncer",
+            "someuser",
+            "someuser",
+            id="set-role-after-reset-all",
+        ),
+    ],
+)
+async def test_unreported_role_reset_query(
+    bouncer, reset_query, next_role, expected_user
+):
+    """Reconcile role after reset queries whose final role is unreported."""
+    bouncer.write_ini(
+        "track_extra_parameters = role\ndefault_pool_size = 1\n"
+        f"server_reset_query = {reset_query}"
+    )
+    await bouncer.restart()
+    bouncer.admin("set pool_mode=session")
+
+    conn_args = {
+        "dbname": "user_passthrough",
+        "user": "pswcheck",
+        "password": "pgbouncer-check",
+    }
+
+    with bouncer.cur(**conn_args, options="-c role=someuser") as cur:
+        first_pid, first_user = cur.execute(
+            "SELECT pg_backend_pid(), current_user"
+        ).fetchone()
+        assert first_user == "someuser"
+
+    if next_role:
+        conn_args["options"] = f"-c role={next_role}"
+
+    with bouncer.cur(**conn_args) as cur:
+        second_pid, second_user = cur.execute(
+            "SELECT pg_backend_pid(), current_user"
+        ).fetchone()
+        assert second_pid == first_pid
+        assert second_user == expected_user
+
+
 async def test_unreported_param_client_discard_all(bouncer):
     """A DISCARD ALL sent by a client resets unreported parameters too, so the
     next transaction needs to SET the value again, also for the client that
