@@ -848,6 +848,61 @@ def test_default_transaction_read_only(bouncer):
         assert rwcur.execute("SHOW transaction_read_only").fetchone()[0] == "off"
 
 
+@pytest.mark.skipif(
+    "PG_MAJOR_VERSION < 14",
+    reason="pg_terminate_backend with a timeout requires PostgreSQL 14",
+)
+@pytest.mark.parametrize(
+    "parameter,value,min_pg_version",
+    [
+        ("application_name", "database_default", 9),
+        ("client_encoding", "LATIN1", 9),
+        ("DateStyle", "ISO, DMY", 9),
+        ("default_transaction_read_only", "on", 14),
+        ("IntervalStyle", "sql_standard", 9),
+        ("scram_iterations", "8192", 16),
+        ("search_path", "pg_catalog", 18),
+        ("standard_conforming_strings", "off", 9),
+        ("TimeZone", "Europe/Paris", 9),
+    ],
+)
+@pytest.mark.parametrize("ignore_parameter", [False, True])
+def test_tracked_database_default_change(
+    bouncer, pg, parameter, value, min_pg_version, ignore_parameter
+):
+    """New clients should inherit the database default after backend replacement."""
+    # session_authorization cannot be set with ALTER DATABASE.
+    if PG_MAJOR_VERSION < min_pg_version:
+        pytest.skip(f"{parameter} requires PostgreSQL {min_pg_version} for GUC_REPORT")
+
+    bouncer.admin("set pool_mode=transaction")
+    ignored = "extra_float_digits,options"
+    if ignore_parameter:
+        ignored += f",{parameter}"
+    bouncer.admin(f"set ignore_startup_parameters='{ignored}'")
+
+    # The fixture otherwise supplies client_encoding explicitly at startup.
+    with bouncer.cur(client_encoding=None) as cur:
+        assert cur.execute(f"SHOW {parameter}").fetchone()[0] != value
+        pid = cur.execute("SELECT pg_backend_pid()").fetchone()[0]
+    try:
+        pg.sql(f"ALTER DATABASE p0 SET {parameter} = '{value}'")
+        assert pg.sql_value("SELECT pg_terminate_backend(%s, 5000)", (pid,))
+        assert (
+            pg.sql_value(f"SHOW {parameter}", dbname="p0", client_encoding=None)
+            == value
+        )
+
+        with bouncer.cur(client_encoding=None) as cur:
+            assert cur.execute("SELECT pg_backend_pid()").fetchone()[0] != pid
+            assert cur.execute(f"SHOW {parameter}").fetchone()[0] == value
+            if parameter == "default_transaction_read_only":
+                with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                    cur.execute("INSERT INTO test_copy VALUES (1)")
+    finally:
+        pg.sql(f"ALTER DATABASE p0 RESET {parameter}")
+
+
 @pytest.mark.skipif("WINDOWS", reason="Windows doesn't support sending SIGTERM")
 async def test_repeated_sigterm(bouncer):
     with bouncer.cur() as cur:
