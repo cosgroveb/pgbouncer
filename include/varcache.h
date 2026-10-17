@@ -21,6 +21,8 @@ bool varcache_set(VarCache *cache, const char *key, const char *value) /* _MUSTC
 bool varcache_apply(PgSocket *server, PgSocket *client, bool *changes_p) _MUSTCHECK;
 void varcache_apply_startup(PktBuf *pkt, PgSocket *client);
 void varcache_fill_unset(VarCache *src, PgSocket *dst);
+void varcache_merge(VarCache *dst, VarCache *src);
+void varcache_replace(VarCache *dst, VarCache *src);
 void varcache_clean(VarCache *cache);
 void varcache_add_params(PktBuf *pkt, VarCache *vars);
 void varcache_deinit(void);

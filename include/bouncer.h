@@ -473,6 +473,7 @@ struct PgPool {
 	bool last_login_failed : 1;
 
 	bool welcome_msg_ready : 1;
+	bool welcome_msg_invalidated : 1;
 
 	uint16_t rrcounter;		/* round-robin counter */
 };
@@ -787,6 +788,7 @@ struct PgSocket {
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
+	struct PktBuf *welcome_msg;	/* staged server or replication-client welcome message without VarCache parameters */
 
 	/* client: prepared statements prepared by this client */
 	PgClientPreparedStatement *client_prepared_statements;

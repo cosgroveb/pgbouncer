@@ -319,6 +319,8 @@ void log_server_error(const char *note, PktHdr *pkt)
  * Preparation of welcome message for client connection.
  */
 
+static bool welcome_client_from(PgSocket *client, const PktBuf *pmsg, VarCache *orig_vars);
+
 PktBuf *new_welcome_msg(void)
 {
 	PktBuf *msg;
@@ -331,35 +333,75 @@ PktBuf *new_welcome_msg(void)
 	return msg;
 }
 
-/* add another server parameter packet to cache */
-bool add_welcome_parameter(PgPool *pool, const char *key, const char *val)
+/* add another server parameter packet to the server login cache */
+bool add_welcome_parameter(PgSocket *server, const char *key, const char *val)
 {
-	PktBuf *msg = pool->welcome_msg;
+	PktBuf *msg = server->welcome_msg;
 
-	if (pool->welcome_msg_ready)
-		return true;
+	if (!msg) {
+		msg = new_welcome_msg();
+		if (!msg)
+			return false;
+		server->welcome_msg = msg;
+	}
 
-	/* if not stored in ->orig_vars, write full packet */
-	if (!varcache_set(&pool->orig_vars, key, val))
+	/* if not tracked in the VarCache, write the full packet */
+	if (!varcache_set(&server->vars, key, val))
 		pktbuf_write_ParameterStatus(msg, key, val);
 
 	return !msg->failed;
 }
 
 /* all parameters processed */
-void finish_welcome_msg(PgSocket *server)
+bool finish_welcome_msg(PgSocket *server)
 {
 	PgPool *pool = server->pool;
-	if (pool->welcome_msg_ready)
-		return;
+	PktBuf *old_msg;
+
+	if (!server->welcome_msg) {
+		server->welcome_msg = new_welcome_msg();
+		if (!server->welcome_msg)
+			return false;
+	}
+
+	if (server->link)
+		varcache_merge(&server->link->vars, &server->vars);
+
+	if (server->replication != REPLICATION_NONE) {
+		if (!pool->welcome_msg_ready) {
+			Assert(server->link);
+			Assert(!server->link->welcome_msg);
+			server->link->welcome_msg = server->welcome_msg;
+			server->welcome_msg = NULL;
+			return true;
+		}
+		pktbuf_free(server->welcome_msg);
+		server->welcome_msg = NULL;
+		return true;
+	}
+
+	varcache_replace(&pool->orig_vars, &server->vars);
+	old_msg = pool->welcome_msg;
+	pool->welcome_msg = server->welcome_msg;
+	server->welcome_msg = NULL;
 	pool->welcome_msg_ready = true;
+	pool->welcome_msg_invalidated = false;
+	if (old_msg)
+		pktbuf_free(old_msg);
+	return true;
 }
 
 bool welcome_client(PgSocket *client)
 {
+	if (client->welcome_msg)
+		return welcome_client_from(client, client->welcome_msg, &client->vars);
+	return welcome_client_from(client, client->pool->welcome_msg, &client->pool->orig_vars);
+}
+
+static bool welcome_client_from(PgSocket *client, const PktBuf *pmsg, VarCache *orig_vars)
+{
 	int res;
 	PgPool *pool = client->pool;
-	const PktBuf *pmsg = pool->welcome_msg;
 	PktBuf *msg;
 
 	slog_noise(client, "P: welcome_client");
@@ -384,7 +426,7 @@ bool welcome_client(PgSocket *client)
 	}
 
 	/* fill vars */
-	varcache_fill_unset(&pool->orig_vars, client);
+	varcache_fill_unset(orig_vars, client);
 	varcache_add_params(msg, &client->vars);
 
 	/* give each client its own cancel key */

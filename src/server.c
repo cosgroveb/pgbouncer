@@ -45,16 +45,16 @@ static bool load_parameter(PgSocket *server, PktHdr *pkt, bool startup)
 		goto failed;
 	slog_debug(server, "S: param: %s = %s", key, val);
 
-	varcache_set(&server->vars, key, val);
-
-	if (client) {
-		slog_debug(client, "setting client var: %s='%s'", key, val);
-		varcache_set(&client->vars, key, val);
+	if (startup) {
+		if (!add_welcome_parameter(server, key, val))
+			goto failed_store;
+	} else {
+		varcache_set(&server->vars, key, val);
 	}
 
-	if (startup) {
-		if (!add_welcome_parameter(server->pool, key, val))
-			goto failed_store;
+	if (client && !startup) {
+		slog_debug(client, "setting client var: %s='%s'", key, val);
+		varcache_set(&client->vars, key, val);
 	}
 
 	return true;
@@ -226,10 +226,19 @@ static bool handle_server_startup(PgSocket *server, PktHdr *pkt)
 
 		/* login ok */
 		slog_debug(server, "server login ok, start accepting queries");
-		server->ready = true;
+		if (server->close_needed || (server->replication && !server->link)) {
+			server->ready = true;
+			res = release_server(server);
+			break;
+		}
 
 		/* got all params */
-		finish_welcome_msg(server);
+		if (!finish_welcome_msg(server)) {
+			disconnect_server(server, true, "failed to store ParameterStatus");
+			break;
+		}
+
+		server->ready = true;
 
 		/* need to notify sbuf if server was closed */
 		res = release_server(server);

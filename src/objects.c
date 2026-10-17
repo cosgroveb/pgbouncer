@@ -191,6 +191,8 @@ void init_caches(void)
 static void client_free(PgSocket *client)
 {
 	free_client_prepared_statements(client);
+	if (client->welcome_msg)
+		pktbuf_free(client->welcome_msg);
 	varcache_clean(&client->vars);
 	slab_free(var_list_cache, client->vars.var_list);
 	slab_free(client_cache, client);
@@ -212,6 +214,8 @@ static void server_free(PgSocket *server)
 
 	free_server_prepared_statements(server);
 	free(server->host);
+	if (server->welcome_msg)
+		pktbuf_free(server->welcome_msg);
 	varcache_clean(&server->vars);
 	slab_free(var_list_cache, server->vars.var_list);
 	slab_free(server_cache, server);
@@ -1244,7 +1248,8 @@ bool release_server(PgSocket *server)
 	case SV_TESTED:
 		break;
 	case SV_LOGIN:
-		pool->last_login_failed = false;
+		if (server->replication == REPLICATION_NONE)
+			pool->last_login_failed = false;
 		pool->last_connect_failed = false;
 		break;
 	default:
@@ -1343,6 +1348,39 @@ static void unlink_server(PgSocket *server, const char *reason)
 		disconnect_client(client, true, "bouncer config error");
 }
 
+static bool statlist_has_regular_server(struct StatList *servers)
+{
+	struct List *item;
+
+	statlist_for_each(item, servers) {
+		PgSocket *server = container_of(item, PgSocket, head);
+		if (server->replication == REPLICATION_NONE)
+			return true;
+	}
+	return false;
+}
+
+static bool pool_has_regular_server(PgPool *pool)
+{
+	return statlist_has_regular_server(&pool->active_server_list) ||
+	       statlist_has_regular_server(&pool->being_canceled_server_list) ||
+	       statlist_has_regular_server(&pool->idle_server_list) ||
+	       statlist_has_regular_server(&pool->tested_server_list) ||
+	       statlist_has_regular_server(&pool->used_server_list);
+}
+
+static void reset_welcome_msg(PgPool *pool)
+{
+	if (pool->welcome_msg_ready)
+		pool->welcome_msg_invalidated = true;
+	if (pool->welcome_msg) {
+		pktbuf_free(pool->welcome_msg);
+		pool->welcome_msg = NULL;
+	}
+	varcache_clean(&pool->orig_vars);
+	pool->welcome_msg_ready = false;
+}
+
 /*
  * close server connection
  *
@@ -1357,10 +1395,14 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	char buf[128];
 	va_list ap;
 	struct List *cancel_item, *tmp;
+	bool was_connected;
 
 	if (server == NULL) {
 		return;
 	}
+	was_connected = server->state == SV_ACTIVE || server->state == SV_TESTED ||
+			server->state == SV_USED || server->state == SV_IDLE ||
+			server->state == SV_BEING_CANCELED;
 
 	va_start(ap, reason);
 	vsnprintf(buf, sizeof(buf), reason, ap);
@@ -1384,13 +1426,16 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 		break;
 	case SV_LOGIN:
 		/*
-		 * usually disconnect means problems in startup phase,
-		 * except when sending cancel packet
+		 * A normal connection failure affects future clients in the pool.
+		 * Replication failures are client-specific, and a ready connection may
+		 * only have been used to send a cancel packet.
 		 */
 		if (!server->ready) {
-			server->pool->last_login_failed = true;
-			server->pool->last_connect_failed = true;
-			safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
+			if (!server->replication) {
+				server->pool->last_login_failed = true;
+				server->pool->last_connect_failed = true;
+				safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
+			}
 		} else
 		{
 			/*
@@ -1435,6 +1480,8 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 		server->pool->user_credentials->global_user->connection_count--;
 
 	change_server_state(server, SV_JUSTFREE);
+	if (was_connected && !pool_has_regular_server(server->pool))
+		reset_welcome_msg(server->pool);
 	if (!sbuf_close(&server->sbuf))
 		log_noise("sbuf_close failed, retry later");
 }
@@ -1868,6 +1915,7 @@ bool evict_user_connection(PgCredentials *user_credentials)
 void launch_new_connection(PgPool *pool, bool evict_if_needed)
 {
 	PgSocket *server;
+	PgSocket *c;
 	int server_count;
 	int max;
 
@@ -1897,6 +1945,7 @@ void launch_new_connection(PgPool *pool, bool evict_if_needed)
 	}
 
 	server_count = pool_server_count(pool);
+	c = first_socket(&pool->waiting_client_list);
 
 	/*
 	 * Peer pools only have a single pool_size.
@@ -1926,9 +1975,9 @@ void launch_new_connection(PgPool *pool, bool evict_if_needed)
 
 	/* is it allowed to add servers? */
 	if (pool_pool_size(pool) > 0) {
-		if (server_count >= pool_pool_size(pool) && pool->welcome_msg_ready) {
+		if (server_count >= pool_pool_size(pool) &&
+		    (pool->welcome_msg_ready || (c && c->replication && !sending_auth_query(c)))) {
 			/* should we use reserve pool? */
-			PgSocket *c = first_socket(&pool->waiting_client_list);
 			if (cf_res_pool_timeout && pool_res_pool_size(pool)) {
 				usec_t now = get_cached_time();
 				if (c && (now - c->request_time) >= cf_res_pool_timeout) {
@@ -2075,7 +2124,9 @@ bool finish_client_login(PgSocket *client)
 	client->wait_for_auth = false;
 
 	/* check if we know server signature */
-	if (!client->pool->welcome_msg_ready) {
+	if (!client->pool->welcome_msg_ready && !client->welcome_msg) {
+		if (client->pool->welcome_msg_invalidated && !check_fast_fail(client))
+			return false;
 		log_debug("finish_client_login: no welcome message, pause");
 		client->wait_for_welcome = true;
 		pause_client(client);
@@ -2088,6 +2139,10 @@ bool finish_client_login(PgSocket *client)
 	/* send the message */
 	if (!welcome_client(client))
 		return false;
+	if (client->welcome_msg) {
+		pktbuf_free(client->welcome_msg);
+		client->welcome_msg = NULL;
+	}
 
 	client->welcome_sent = true;
 	slog_debug(client, "logged in");
@@ -2379,7 +2434,6 @@ void tag_pool_dirty(PgPool *pool)
 {
 	struct List *item, *tmp;
 	struct PgSocket *server;
-	PktBuf *msg;
 
 	/*
 	 * Don't tag the admin pool as dirty, since this is not an actual postgres
@@ -2389,12 +2443,7 @@ void tag_pool_dirty(PgPool *pool)
 	if (pool->db->admin)
 		return;
 
-	/* reset welcome msg */
-	if (pool->welcome_msg) {
-		pktbuf_free(pool->welcome_msg);
-		pool->welcome_msg = NULL;
-	}
-	pool->welcome_msg_ready = false;
+	reset_welcome_msg(pool);
 
 	/* drop all existing servers ASAP */
 	for_each_server(pool, tag_dirty);
@@ -2404,11 +2453,6 @@ void tag_pool_dirty(PgPool *pool)
 		server = container_of(item, PgSocket, head);
 		disconnect_server(server, true, "connect string changed");
 	}
-
-	msg = new_welcome_msg();
-	if (!msg)
-		return;
-	pool->welcome_msg = msg;
 }
 
 void tag_database_dirty(PgDatabase *db)

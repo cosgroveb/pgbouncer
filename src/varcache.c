@@ -376,6 +376,26 @@ void varcache_fill_unset(VarCache *src, PgSocket *dst)
 	}
 }
 
+void varcache_merge(VarCache *dst, VarCache *src)
+{
+	for (int i = 0; i < num_var_cached; i++) {
+		if (!src->var_list[i])
+			continue;
+		strpool_incref(src->var_list[i]);
+		strpool_decref(dst->var_list[i]);
+		dst->var_list[i] = src->var_list[i];
+	}
+}
+
+void varcache_replace(VarCache *dst, VarCache *src)
+{
+	for (int i = 0; i < num_var_cached; i++) {
+		strpool_incref(src->var_list[i]);
+		strpool_decref(dst->var_list[i]);
+		dst->var_list[i] = src->var_list[i];
+	}
+}
+
 void varcache_clean(VarCache *cache)
 {
 	for (int i = 0; i < num_var_cached; i++) {

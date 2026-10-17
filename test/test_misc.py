@@ -4,6 +4,7 @@ import socket
 import struct
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg
 import pytest
@@ -17,6 +18,7 @@ from .utils import (
     PKT_BUF_SIZE,
     USE_UNIX_SOCKETS,
     WINDOWS,
+    wait_until,
 )
 
 
@@ -894,6 +896,10 @@ def test_tracked_database_default_change(
         )
 
         with bouncer.cur(client_encoding=None) as cur:
+            assert (
+                cur.connection.pgconn.parameter_status(parameter.encode()).decode()
+                == value
+            )
             assert cur.execute("SELECT pg_backend_pid()").fetchone()[0] != pid
             assert cur.execute(f"SHOW {parameter}").fetchone()[0] == value
             if parameter == "default_transaction_read_only":
@@ -901,6 +907,81 @@ def test_tracked_database_default_change(
                     cur.execute("INSERT INTO test_copy VALUES (1)")
     finally:
         pg.sql(f"ALTER DATABASE p0 RESET {parameter}")
+
+
+@pytest.mark.skipif(
+    "PG_MAJOR_VERSION < 14",
+    reason="pg_terminate_backend with a timeout requires PostgreSQL 14",
+)
+def test_existing_client_keeps_tracked_database_default(bouncer, pg):
+    """Existing clients keep login-time settings across backend replacement."""
+    bouncer.admin("set pool_mode=transaction")
+
+    with bouncer.cur() as cur:
+        original = cur.execute("SHOW TimeZone").fetchone()[0]
+        pid = cur.execute("SELECT pg_backend_pid()").fetchone()[0]
+        try:
+            pg.sql("ALTER DATABASE p0 SET TimeZone = 'Europe/Paris'")
+            assert pg.sql_value("SELECT pg_terminate_backend(%s, 5000)", (pid,))
+
+            assert cur.execute("SELECT pg_backend_pid()").fetchone()[0] != pid
+            assert cur.execute("SHOW TimeZone").fetchone()[0] == original
+
+            with bouncer.cur() as new_cur:
+                assert new_cur.execute("SHOW TimeZone").fetchone()[0] == "Europe/Paris"
+        finally:
+            pg.sql("ALTER DATABASE p0 RESET TimeZone")
+
+
+def test_failed_server_login_does_not_replace_database_defaults(bouncer, pg):
+    bouncer.admin("set pool_mode=transaction")
+    pg.sql("ALTER DATABASE p0 SET TimeZone = 'UTC'")
+
+    try:
+        with bouncer.cur(dbname="connect_query_failure", autocommit=False) as cur:
+            cur.execute("SELECT 1")
+            original = cur.connection.pgconn.parameter_status(b"TimeZone")
+            assert original == b"UTC"
+            pg.sql("ALTER DATABASE p0 SET TimeZone = 'Europe/Paris'")
+            with (
+                pg.cur(dbname="p0") as lock_cur,
+                bouncer.cur(dbname="connect_query_failure") as failing_cur,
+                ThreadPoolExecutor(max_workers=1) as executor,
+            ):
+                lock_cur.execute("SELECT pg_advisory_lock(1658)")
+
+                future = executor.submit(failing_cur.execute, "SELECT 1")
+                try:
+                    candidate_pid = None
+                    for _ in wait_until("connect_query did not block"):
+                        rows = pg.sql(
+                            """
+                            SELECT pid
+                            FROM pg_stat_activity
+                            WHERE usename = 'bouncer'
+                              AND state = 'active'
+                              AND wait_event_type = 'Lock'
+                              AND query LIKE '%pg_advisory_lock(1658)%'
+                            """,
+                            dbname="p0",
+                        )
+                        if rows:
+                            candidate_pid = rows[0][0]
+                            break
+
+                    assert pg.sql_value(
+                        "SELECT pg_terminate_backend(%s)", (candidate_pid,)
+                    )
+
+                    with bouncer.conn(dbname="connect_query_failure") as conn:
+                        cached_timezone = conn.pgconn.parameter_status(b"TimeZone")
+                finally:
+                    cur.execute("ROLLBACK")
+
+                future.result(timeout=5)
+                assert cached_timezone == original
+    finally:
+        pg.sql("ALTER DATABASE p0 RESET TimeZone")
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows doesn't support sending SIGTERM")
