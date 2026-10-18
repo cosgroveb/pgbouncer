@@ -59,6 +59,7 @@ void parse_server_error(PktHdr *pkt, const char **level_p, const char **msg_p, c
 
 bool add_welcome_parameter(PgSocket *server, const char *key, const char *val) _MUSTCHECK;
 bool finish_welcome_msg(PgSocket *server) _MUSTCHECK;
+bool client_has_welcome_msg(PgSocket *client);
 bool welcome_client(PgSocket *client) _MUSTCHECK;
 
 bool answer_authreq(PgSocket *server, PktHdr *pkt) _MUSTCHECK;

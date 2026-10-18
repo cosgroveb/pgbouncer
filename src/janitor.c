@@ -826,6 +826,7 @@ void kill_pool(PgPool *pool)
 	close_server_list(&pool->new_server_list, reason);
 
 	pktbuf_free(pool->welcome_msg);
+	pktbuf_free(pool->pending_welcome_msg);
 
 	list_del(&pool->map_head);
 	statlist_remove(&pool_list, &pool->head);
@@ -844,6 +845,7 @@ void kill_peer_pool(PgPool *pool)
 	close_server_list(&pool->new_server_list, reason);
 
 	pktbuf_free(pool->welcome_msg);
+	pktbuf_free(pool->pending_welcome_msg);
 
 	list_del(&pool->map_head);
 	statlist_remove(&peer_pool_list, &pool->head);

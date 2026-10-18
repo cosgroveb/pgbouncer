@@ -191,8 +191,6 @@ void init_caches(void)
 static void client_free(PgSocket *client)
 {
 	free_client_prepared_statements(client);
-	if (client->welcome_msg)
-		pktbuf_free(client->welcome_msg);
 	varcache_clean(&client->vars);
 	slab_free(var_list_cache, client->vars.var_list);
 	slab_free(client_cache, client);
@@ -214,8 +212,6 @@ static void server_free(PgSocket *server)
 
 	free_server_prepared_statements(server);
 	free(server->host);
-	if (server->welcome_msg)
-		pktbuf_free(server->welcome_msg);
 	varcache_clean(&server->vars);
 	slab_free(var_list_cache, server->vars.var_list);
 	slab_free(server_cache, server);
@@ -1248,8 +1244,7 @@ bool release_server(PgSocket *server)
 	case SV_TESTED:
 		break;
 	case SV_LOGIN:
-		if (server->replication == REPLICATION_NONE)
-			pool->last_login_failed = false;
+		pool->last_login_failed = false;
 		pool->last_connect_failed = false;
 		break;
 	default:
@@ -1426,16 +1421,13 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 		break;
 	case SV_LOGIN:
 		/*
-		 * A normal connection failure affects future clients in the pool.
-		 * Replication failures are client-specific, and a ready connection may
-		 * only have been used to send a cancel packet.
+		 * usually disconnect means problems in startup phase,
+		 * except when sending cancel packet
 		 */
 		if (!server->ready) {
-			if (!server->replication) {
-				server->pool->last_login_failed = true;
-				server->pool->last_connect_failed = true;
-				safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
-			}
+			server->pool->last_login_failed = true;
+			server->pool->last_connect_failed = true;
+			safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
 		} else
 		{
 			/*
@@ -1474,6 +1466,11 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	}
 
 	free_scram_state(&server->scram_state);
+	if (server->pool->pending_welcome_server == server) {
+		pktbuf_free(server->pool->pending_welcome_msg);
+		server->pool->pending_welcome_msg = NULL;
+		server->pool->pending_welcome_server = NULL;
+	}
 
 	server->pool->db->connection_count--;
 	if (server->pool->user_credentials)
@@ -1975,6 +1972,10 @@ void launch_new_connection(PgPool *pool, bool evict_if_needed)
 
 	/* is it allowed to add servers? */
 	if (pool_pool_size(pool) > 0) {
+		/*
+		 * Replication connections do not populate the pool welcome message,
+		 * so enforce pool_size for them even before that message is ready.
+		 */
 		if (server_count >= pool_pool_size(pool) &&
 		    (pool->welcome_msg_ready || (c && c->replication && !sending_auth_query(c)))) {
 			/* should we use reserve pool? */
@@ -2124,8 +2125,8 @@ bool finish_client_login(PgSocket *client)
 	client->wait_for_auth = false;
 
 	/* check if we know server signature */
-	if (!client->pool->welcome_msg_ready && !client->welcome_msg) {
-		if (client->pool->welcome_msg_invalidated && !check_fast_fail(client))
+	if (!client_has_welcome_msg(client)) {
+		if (!client->replication && client->pool->welcome_msg_invalidated && !check_fast_fail(client))
 			return false;
 		log_debug("finish_client_login: no welcome message, pause");
 		client->wait_for_welcome = true;
@@ -2139,10 +2140,6 @@ bool finish_client_login(PgSocket *client)
 	/* send the message */
 	if (!welcome_client(client))
 		return false;
-	if (client->welcome_msg) {
-		pktbuf_free(client->welcome_msg);
-		client->welcome_msg = NULL;
-	}
 
 	client->welcome_sent = true;
 	slog_debug(client, "logged in");

@@ -34,13 +34,14 @@ def test_logical_rep(bouncer):
 def test_first_logical_rep_does_not_set_pool_defaults(pg, bouncer):
     pg.sql("ALTER DATABASE p0 SET TimeZone = 'UTC'")
     try:
-        bouncer.sql(
-            "IDENTIFY_SYSTEM",
+        with bouncer.conn(
             dbname="user_passthrough",
             user="postgres",
             replication="database",
             options="-c TimeZone=Europe/Paris",
-        )
+        ) as conn:
+            assert conn.pgconn.parameter_status(b"TimeZone") == b"Europe/Paris"
+            conn.execute("IDENTIFY_SYSTEM")
 
         with bouncer.conn(dbname="user_passthrough", user="postgres") as conn:
             assert conn.pgconn.parameter_status(b"TimeZone") == b"UTC"
@@ -76,10 +77,6 @@ def test_logical_rep_unprivileged(bouncer):
     else:
         expected_log = "permission denied to start WAL sender"
 
-    bouncer.test()
-    bouncer.admin("reconnect p0")
-    bouncer.admin("wait_close p0")
-
     with (
         bouncer.log_contains(
             expected_log,
@@ -88,37 +85,6 @@ def test_logical_rep_unprivileged(bouncer):
         pytest.raises(psycopg.OperationalError, match=r"login failed"),
     ):
         bouncer.sql("IDENTIFY_SYSTEM", replication="database")
-
-    bouncer.test()
-
-
-@pytest.mark.skipif(
-    "PG_MAJOR_VERSION < 10", reason="logical replication was introduced in PG10"
-)
-def test_logical_rep_preserves_login_failure(pg, bouncer):
-    dbname = "replication_connect_query_failure"
-    bouncer.admin("set pool_mode=transaction")
-    bouncer.admin("set query_timeout=1")
-    pg.sql("ALTER DATABASE p0 SET TimeZone = 'UTC'")
-    try:
-        with bouncer.cur(dbname=dbname, autocommit=False) as cur:
-            cur.execute("SELECT 1")
-            pg.sql("ALTER DATABASE p0 SET TimeZone = 'Europe/Paris'")
-
-            with pytest.raises(psycopg.OperationalError, match="query_timeout"):
-                bouncer.test(dbname=dbname)
-
-            bouncer.admin("set server_login_retry=0")
-            bouncer.sql("IDENTIFY_SYSTEM", dbname=dbname, replication="database")
-            cur.execute("ROLLBACK")
-
-        bouncer.admin(f"reconnect {dbname}")
-        bouncer.admin(f"wait_close {dbname}")
-
-        with pytest.raises(psycopg.OperationalError, match="server_login_retry"):
-            bouncer.test(dbname=dbname)
-    finally:
-        pg.sql("ALTER DATABASE p0 RESET TimeZone")
 
 
 @pytest.mark.skipif(

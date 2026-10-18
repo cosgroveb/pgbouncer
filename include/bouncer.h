@@ -460,6 +460,8 @@ struct PgPool {
 
 	/* database info to be sent to client */
 	struct PktBuf *welcome_msg;	/* ServerParams without VarCache ones */
+	struct PktBuf *pending_welcome_msg;	/* ServerParams from pending server */
+	PgSocket *pending_welcome_server;	/* owner of pending_welcome_msg */
 
 	VarCache orig_vars;		/* default params from server */
 
@@ -788,7 +790,6 @@ struct PgSocket {
 #endif
 
 	VarCache vars;		/* state of interesting server parameters */
-	struct PktBuf *welcome_msg;	/* staged server or replication-client welcome message without VarCache parameters */
 
 	/* client: prepared statements prepared by this client */
 	PgClientPreparedStatement *client_prepared_statements;

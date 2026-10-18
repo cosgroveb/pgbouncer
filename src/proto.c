@@ -321,6 +321,13 @@ void log_server_error(const char *note, PktHdr *pkt)
 
 static bool welcome_client_from(PgSocket *client, const PktBuf *pmsg, VarCache *orig_vars);
 
+static void discard_pending_welcome_msg(PgPool *pool)
+{
+	pktbuf_free(pool->pending_welcome_msg);
+	pool->pending_welcome_msg = NULL;
+	pool->pending_welcome_server = NULL;
+}
+
 PktBuf *new_welcome_msg(void)
 {
 	PktBuf *msg;
@@ -333,16 +340,20 @@ PktBuf *new_welcome_msg(void)
 	return msg;
 }
 
-/* add another server parameter packet to the server login cache */
+/* add another server parameter packet to the pending pool login cache */
 bool add_welcome_parameter(PgSocket *server, const char *key, const char *val)
 {
-	PktBuf *msg = server->welcome_msg;
+	PgPool *pool = server->pool;
+	PktBuf *msg = pool->pending_welcome_msg;
 
 	if (!msg) {
 		msg = new_welcome_msg();
 		if (!msg)
 			return false;
-		server->welcome_msg = msg;
+		pool->pending_welcome_msg = msg;
+		pool->pending_welcome_server = server;
+	} else if (pool->pending_welcome_server != server) {
+		return false;
 	}
 
 	/* if not tracked in the VarCache, write the full packet */
@@ -358,32 +369,31 @@ bool finish_welcome_msg(PgSocket *server)
 	PgPool *pool = server->pool;
 	PktBuf *old_msg;
 
-	if (!server->welcome_msg) {
-		server->welcome_msg = new_welcome_msg();
-		if (!server->welcome_msg)
+	if (!pool->pending_welcome_msg) {
+		pool->pending_welcome_msg = new_welcome_msg();
+		if (!pool->pending_welcome_msg)
 			return false;
+		pool->pending_welcome_server = server;
+	} else if (pool->pending_welcome_server != server) {
+		return false;
 	}
 
-	if (server->link)
-		varcache_merge(&server->link->vars, &server->vars);
-
 	if (server->replication != REPLICATION_NONE) {
-		if (!pool->welcome_msg_ready) {
-			Assert(server->link);
-			Assert(!server->link->welcome_msg);
-			server->link->welcome_msg = server->welcome_msg;
-			server->welcome_msg = NULL;
-			return true;
-		}
-		pktbuf_free(server->welcome_msg);
-		server->welcome_msg = NULL;
+		Assert(server->link);
+		varcache_merge(&server->link->vars, &server->vars);
+		return true;
+	}
+
+	if (pool->welcome_msg_ready) {
+		discard_pending_welcome_msg(pool);
 		return true;
 	}
 
 	varcache_replace(&pool->orig_vars, &server->vars);
 	old_msg = pool->welcome_msg;
-	pool->welcome_msg = server->welcome_msg;
-	server->welcome_msg = NULL;
+	pool->welcome_msg = pool->pending_welcome_msg;
+	pool->pending_welcome_msg = NULL;
+	pool->pending_welcome_server = NULL;
 	pool->welcome_msg_ready = true;
 	pool->welcome_msg_invalidated = false;
 	if (old_msg)
@@ -391,10 +401,29 @@ bool finish_welcome_msg(PgSocket *server)
 	return true;
 }
 
+static bool client_has_pending_welcome_msg(PgSocket *client)
+{
+	PgPool *pool = client->pool;
+
+	return pool->pending_welcome_msg && client->replication != REPLICATION_NONE && client->link &&
+	       pool->pending_welcome_server == client->link;
+}
+
+bool client_has_welcome_msg(PgSocket *client)
+{
+	if (client->replication != REPLICATION_NONE)
+		return client_has_pending_welcome_msg(client);
+	return client->pool->welcome_msg_ready;
+}
+
 bool welcome_client(PgSocket *client)
 {
-	if (client->welcome_msg)
-		return welcome_client_from(client, client->welcome_msg, &client->vars);
+	if (client_has_pending_welcome_msg(client)) {
+		bool res = welcome_client_from(client, client->pool->pending_welcome_msg, &client->vars);
+		if (res)
+			discard_pending_welcome_msg(client->pool);
+		return res;
+	}
 	return welcome_client_from(client, client->pool->welcome_msg, &client->pool->orig_vars);
 }
 
