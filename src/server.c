@@ -718,9 +718,8 @@ static bool handle_connect(PgSocket *server)
 		slog_debug(server, "use it for pending cancel req");
 		forward_cancel_request(server);
 	} else if (pool->db->peer_id) {
-		/* notify disconnect_server() that connect did not fail */
-		server->ready = true;
-		disconnect_server(server, false, "peer server was not necessary anymore, because client cancel connection was already closed");
+		disconnect_server_with_outcome(server, false, SERVER_CONNECTION_ESTABLISHED,
+					       "peer server was not necessary anymore, because client cancel connection was already closed");
 	} else {
 		/* proceed with login */
 		if (server_connect_sslmode > SSLMODE_DISABLED && !is_unix) {

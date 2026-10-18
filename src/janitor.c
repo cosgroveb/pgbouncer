@@ -30,7 +30,7 @@ static struct event full_maint_ev;
 extern bool any_user_level_server_timeout_set;
 extern bool any_user_level_client_timeout_set;
 
-/* close all sockets in server list */
+/* administratively close all sockets in server list */
 static void close_server_list(struct StatList *sk_list, const char *reason)
 {
 	struct List *item, *tmp;
@@ -38,7 +38,7 @@ static void close_server_list(struct StatList *sk_list, const char *reason)
 
 	statlist_for_each_safe(item, sk_list, tmp) {
 		server = container_of(item, PgSocket, head);
-		disconnect_server(server, true, "%s", reason);
+		disconnect_server_with_outcome(server, true, SERVER_CONNECTION_ABORTED, reason);
 	}
 }
 
@@ -198,27 +198,13 @@ static void per_loop_activate(PgPool *pool)
 static int per_loop_pause(PgPool *pool)
 {
 	int active = 0;
-	bool last_login_failed;
-	bool last_connect_failed;
-	char last_connect_failed_message[sizeof(pool->last_connect_failed_message)];
 
 	if (pool->db->admin)
 		return 0;
 
 	close_server_list(&pool->idle_server_list, "pause mode");
 	close_server_list(&pool->used_server_list, "pause mode");
-
-	/*
-	 * Closing a login in progress because of the pause says nothing about
-	 * the server, so don't let it count as a failed login.
-	 */
-	last_login_failed = pool->last_login_failed;
-	last_connect_failed = pool->last_connect_failed;
-	safe_strcpy(last_connect_failed_message, pool->last_connect_failed_message, sizeof(last_connect_failed_message));
 	close_server_list(&pool->new_server_list, "pause mode");
-	pool->last_login_failed = last_login_failed;
-	pool->last_connect_failed = last_connect_failed;
-	safe_strcpy(pool->last_connect_failed_message, last_connect_failed_message, sizeof(pool->last_connect_failed_message));
 
 	active += statlist_count(&pool->active_server_list);
 	active += statlist_count(&pool->tested_server_list);
