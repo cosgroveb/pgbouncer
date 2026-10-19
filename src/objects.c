@@ -1351,21 +1351,14 @@ static void unlink_server(PgSocket *server, const char *reason)
  * The latter is for protocol and communication errors where a normal
  * protocol termination is not possible.
  */
-void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...)
+void disconnect_server_with_outcome(PgSocket *server, bool send_term, enum ServerConnectionOutcome outcome, const char *reason)
 {
 	usec_t now = get_cached_time();
-	char buf[128];
-	va_list ap;
 	struct List *cancel_item, *tmp;
 
 	if (server == NULL) {
 		return;
 	}
-
-	va_start(ap, reason);
-	vsnprintf(buf, sizeof(buf), reason, ap);
-	va_end(ap);
-	reason = buf;
 
 	if (cf_log_disconnections) {
 		slog_info(server, "closing because: %s (age=%" PRIu64 "s)", reason,
@@ -1383,23 +1376,17 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	case SV_BEING_CANCELED:
 		break;
 	case SV_LOGIN:
-		/*
-		 * usually disconnect means problems in startup phase,
-		 * except when sending cancel packet
-		 */
-		if (!server->ready) {
+		switch (outcome) {
+		case SERVER_CONNECTION_FAILED:
 			server->pool->last_login_failed = true;
 			server->pool->last_connect_failed = true;
 			safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
-		} else
-		{
-			/*
-			 * We did manage to connect and used the connection for query
-			 * cancellation, so to the best of our knowledge we can connect to
-			 * the server, reset last_connect_failed accordingly.
-			 */
+			break;
+		case SERVER_CONNECTION_ABORTED:
+			break;
+		case SERVER_CONNECTION_ESTABLISHED:
 			server->pool->last_connect_failed = false;
-			send_term = false;
+			break;
 		}
 		if (server->replication)
 			unlink_server(server, reason);
@@ -1437,6 +1424,21 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	change_server_state(server, SV_JUSTFREE);
 	if (!sbuf_close(&server->sbuf))
 		log_noise("sbuf_close failed, retry later");
+}
+
+void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...)
+{
+	char buf[128];
+	va_list ap;
+
+	if (server == NULL)
+		return;
+
+	va_start(ap, reason);
+	vsnprintf(buf, sizeof(buf), reason, ap);
+	va_end(ap);
+
+	disconnect_server_with_outcome(server, send_term, SERVER_CONNECTION_FAILED, buf);
 }
 
 /*
@@ -1545,9 +1547,8 @@ void disconnect_client_sqlstate(PgSocket *client, bool notify, const char *sqlst
 			PgSocket *server = client->link;
 			server->link = NULL;
 			client->link = NULL;
-			/* notify disconnect_server() that connect did not fail */
-			server->ready = true;
-			disconnect_server(server, false, "client gave up on cancel request, so we also give up forwarding to server");
+			disconnect_server_with_outcome(server, false, SERVER_CONNECTION_ESTABLISHED,
+						       "client gave up on cancel request, so we also give up forwarding to server");
 		}
 		/*
 		 * If the cancel request is still linked to the server that it
