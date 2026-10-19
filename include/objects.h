@@ -57,8 +57,20 @@ bool release_server(PgSocket *server) /* _MUSTCHECK */;
 bool finish_client_login(PgSocket *client)      _MUSTCHECK;
 bool check_fast_fail(PgSocket *client)          _MUSTCHECK;
 
+/*
+ * Result of a connection attempt when an SV_LOGIN server is disconnected.
+ * ABORTED supplies no new evidence; ESTABLISHED says only that the transport
+ * connection succeeded.
+ */
+enum ServerConnectResult {
+	SERVER_CONNECT_FAILED,
+	SERVER_CONNECT_ABORTED,
+	SERVER_CONNECT_ESTABLISHED,
+};
+
 PgSocket *accept_client(int sock, bool is_unix) _MUSTCHECK;
 void disconnect_server(PgSocket *server, bool notify, const char *reason, ...) _PRINTF(3, 4);
+void disconnect_server_during_login(PgSocket *server, bool send_term, enum ServerConnectResult result, const char *reason);
 void disconnect_client(PgSocket *client, bool notify, const char *reason, ...) _PRINTF(3, 4);
 void disconnect_client_sqlstate(PgSocket *client, bool notify, const char *sqlstate, const char *reason);
 

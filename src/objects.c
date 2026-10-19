@@ -1351,21 +1351,14 @@ static void unlink_server(PgSocket *server, const char *reason)
  * The latter is for protocol and communication errors where a normal
  * protocol termination is not possible.
  */
-void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...)
+static void disconnect_server_internal(PgSocket *server, bool send_term, enum ServerConnectResult result, const char *reason)
 {
 	usec_t now = get_cached_time();
-	char buf[128];
-	va_list ap;
 	struct List *cancel_item, *tmp;
 
 	if (server == NULL) {
 		return;
 	}
-
-	va_start(ap, reason);
-	vsnprintf(buf, sizeof(buf), reason, ap);
-	va_end(ap);
-	reason = buf;
 
 	if (cf_log_disconnections) {
 		slog_info(server, "closing because: %s (age=%" PRIu64 "s)", reason,
@@ -1383,23 +1376,18 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	case SV_BEING_CANCELED:
 		break;
 	case SV_LOGIN:
-		/*
-		 * usually disconnect means problems in startup phase,
-		 * except when sending cancel packet
-		 */
-		if (!server->ready) {
+		switch (result) {
+		case SERVER_CONNECT_FAILED:
 			server->pool->last_login_failed = true;
 			server->pool->last_connect_failed = true;
 			safe_strcpy(server->pool->last_connect_failed_message, reason, sizeof(server->pool->last_connect_failed_message));
-		} else
-		{
-			/*
-			 * We did manage to connect and used the connection for query
-			 * cancellation, so to the best of our knowledge we can connect to
-			 * the server, reset last_connect_failed accordingly.
-			 */
+			break;
+		case SERVER_CONNECT_ABORTED:
+			break;
+		case SERVER_CONNECT_ESTABLISHED:
 			server->pool->last_connect_failed = false;
 			send_term = false;
+			break;
 		}
 		if (server->replication)
 			unlink_server(server, reason);
@@ -1437,6 +1425,29 @@ void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...
 	change_server_state(server, SV_JUSTFREE);
 	if (!sbuf_close(&server->sbuf))
 		log_noise("sbuf_close failed, retry later");
+}
+
+void disconnect_server(PgSocket *server, bool send_term, const char *reason, ...)
+{
+	char buf[128];
+	va_list ap;
+	enum ServerConnectResult result;
+
+	if (server == NULL)
+		return;
+
+	va_start(ap, reason);
+	vsnprintf(buf, sizeof(buf), reason, ap);
+	va_end(ap);
+
+	result = server->ready ? SERVER_CONNECT_ESTABLISHED : SERVER_CONNECT_FAILED;
+	disconnect_server_internal(server, send_term, result, buf);
+}
+
+void disconnect_server_during_login(PgSocket *server, bool send_term, enum ServerConnectResult result, const char *reason)
+{
+	Assert(server == NULL || server->state == SV_LOGIN);
+	disconnect_server_internal(server, send_term, result, reason);
 }
 
 /*
