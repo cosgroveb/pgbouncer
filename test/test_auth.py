@@ -662,6 +662,27 @@ def test_auth_query_works_with_configured_users(bouncer):
         )
 
 
+@pytest.mark.md5
+def test_auth_query_after_user_removed_from_auth_file(bouncer):
+    bouncer.write_ini("auth_type = md5")
+    bouncer.write_ini("auth_user = pswcheck")
+    bouncer.write_ini(
+        "auth_query = SELECT usename, passwd FROM pg_shadow where usename = $1"
+    )
+    bouncer.admin("reload")
+
+    # puser2 uses "bar" in auth_file and "wrong" in PostgreSQL.
+    bouncer.test(user="puser2", password="bar")
+
+    auth_file = bouncer.auth_path.read_text()
+    user_entry = '"puser2" "bar"\n'
+    assert user_entry in auth_file
+    bouncer.auth_path.write_text(auth_file.replace(user_entry, ""))
+    bouncer.admin("reload")
+
+    bouncer.test(user="puser2", password="wrong")
+
+
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
 def test_auth_query_logs_server_error(
     bouncer,
