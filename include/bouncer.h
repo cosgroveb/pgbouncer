@@ -568,6 +568,7 @@ struct PgCredentials {
  */
 struct PgGlobalUser {
 	PgCredentials credentials;	/* needs to be first for AAtree */
+	bool in_auth_file;	/* present in the last loaded auth_file */
 	struct List head;	/* used to attach user to list */
 	struct List pool_list;	/* list of pools where pool->user == this user */
 	int pool_mode;

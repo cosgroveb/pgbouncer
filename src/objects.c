@@ -783,8 +783,10 @@ PgPool *get_pool(PgDatabase *db, PgCredentials *user_credentials)
 
 	list_for_each(item, &user_credentials->global_user->pool_list) {
 		pool = container_of(item, PgPool, map_head);
-		if (pool->db == db)
+		if (pool->db == db) {
+			pool->user_credentials = user_credentials;
 			return pool;
+		}
 	}
 
 	return new_pool(db, user_credentials);

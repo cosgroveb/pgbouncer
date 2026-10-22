@@ -618,7 +618,7 @@ bool set_pool(PgSocket *client, const char *dbname, const char *username)
 		if (!check_user_connection_count(client))
 			return false;
 
-		if (!client->login_user_credentials || client->login_user_credentials->dynamic_passwd) {
+		if (!client->login_user_credentials || !client->login_user_credentials->global_user->in_auth_file) {
 			PgGlobalUser *global_user;
 			/*
 			 * If the login user specified by the client

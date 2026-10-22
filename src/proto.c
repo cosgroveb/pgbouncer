@@ -457,7 +457,7 @@ bool welcome_client(PgSocket *client)
 static PgCredentials *get_srv_psw(PgSocket *server)
 {
 	PgDatabase *db = server->pool->db;
-	PgCredentials *credentials = server->pool->user_credentials;
+	PgCredentials *credentials = server->login_user_credentials;
 
 	/* if forced user without password, use userlist psw */
 	if (!credentials->passwd[0] && db->forced_user_credentials) {

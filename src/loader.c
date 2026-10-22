@@ -657,6 +657,7 @@ static void unquote_add_authfile_user(const char *username, const char *password
 	}
 
 	user->credentials.dynamic_passwd = false;
+	user->in_auth_file = true;
 
 	/* Clear cached scram secrets since the user may have changed the password. */
 	if (user->credentials.scram_SaltKey != NULL) {
@@ -710,6 +711,7 @@ static void disable_users(void)
 	statlist_for_each(item, &user_list) {
 		PgGlobalUser *user = container_of(item, PgGlobalUser, head);
 		user->credentials.passwd[0] = 0;
+		user->in_auth_file = false;
 	}
 }
 
@@ -717,6 +719,7 @@ static void disable_users(void)
 bool load_auth_file(const char *fn)
 {
 	char *user, *password, *buf, *p;
+	struct List *item;
 
 	/* No file to load? */
 	if (fn == NULL)
@@ -786,6 +789,18 @@ bool load_auth_file(const char *fn)
 		while (*p && *p != '\n') p++;
 	}
 	free(buf);
+
+	/* Removed users must not retain usable SCRAM secrets. */
+	statlist_for_each(item, &user_list) {
+		PgGlobalUser *global_user = container_of(item, PgGlobalUser, head);
+		PgCredentials *credentials = &global_user->credentials;
+		if (global_user->in_auth_file)
+			continue;
+		free(credentials->scram_SaltKey);
+		credentials->scram_SaltKey = NULL;
+		credentials->scram_verifier_cached = false;
+		credentials->scram_passthrough_valid = false;
+	}
 
 	return true;
 }

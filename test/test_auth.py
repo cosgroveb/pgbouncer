@@ -683,6 +683,157 @@ def test_auth_query_after_user_removed_from_auth_file(bouncer):
     bouncer.test(user="puser2", password="wrong")
 
 
+@pytest.mark.md5
+@pytest.mark.parametrize("entry", ['"puser2" ""\n', "", "broken\n"])
+def test_auth_file_empty_and_malformed_entries(bouncer, entry):
+    bouncer.write_ini("auth_type = md5\nauth_user = pswcheck")
+    auth_file = bouncer.auth_path.read_text()
+    bouncer.auth_path.write_text(auth_file.replace('"puser2" "bar"\n', ""))
+    bouncer.auth_path.write_text(bouncer.auth_path.read_text() + entry)
+    bouncer.admin("reload")
+
+    # A present empty password must not fall back to auth_query.
+    if entry.startswith('"'):
+        with pytest.raises(
+            psycopg.OperationalError, match="password authentication failed"
+        ):
+            bouncer.test(user="puser2", password="wrong")
+    else:
+        bouncer.test(user="puser2", password="wrong")
+    # A malformed suffix must preserve the accepted prefix.
+    bouncer.test(user="puser1", password="foo")
+
+
+@pytest.mark.md5
+def test_auth_file_failed_reload_preserves_users(bouncer):
+    bouncer.write_ini("auth_type = md5\nauth_user = pswcheck")
+    bouncer.admin("reload")
+    bouncer.test(user="puser2", password="bar")
+    bouncer.auth_path.rename(bouncer.auth_path.with_suffix(".saved"))
+    bouncer.admin("reload")
+    bouncer.test(user="puser2", password="bar")
+    with pytest.raises(
+        psycopg.OperationalError, match="password authentication failed"
+    ):
+        bouncer.test(user="puser2", password="wrong")
+
+
+@pytest.mark.md5
+def test_auth_file_empty_reload(bouncer):
+    bouncer.write_ini("auth_type = md5\nauth_user = pswcheck")
+    bouncer.admin("reload")
+    bouncer.test(user="puser2", password="bar")
+    with bouncer.admin_runner.conn() as admin:
+        admin.autocommit = True
+        bouncer.auth_path.write_text("")
+        for _ in range(2):
+            admin.execute("RELOAD")
+            bouncer.test(user="puser2", password="wrong")
+
+
+@pytest.mark.md5
+def test_auth_file_removal_keeps_query_credentials_per_database(bouncer):
+    bouncer.ini_path.write_text(
+        bouncer.ini_path.read_text().replace(
+            "[databases]",
+            f"""[databases]
+            first = host={bouncer.pg.host} port={bouncer.pg.port} dbname=p0 auth_query='SELECT $1::text, $$first$$::text'
+            second = host={bouncer.pg.host} port={bouncer.pg.port} dbname=p0 auth_query='SELECT $1::text, $$second$$::text'
+            """,
+        )
+    )
+    bouncer.write_ini("auth_type = md5\nauth_user = pswcheck")
+    bouncer.admin("reload")
+    bouncer.test(dbname="first", user="puser2", password="bar")
+    bouncer.auth_path.write_text(
+        bouncer.auth_path.read_text().replace('"puser2" "bar"\n', "")
+    )
+    bouncer.admin("reload")
+    for database in ("first", "second", "first"):
+        bouncer.test(dbname=database, user="puser2", password=database)
+
+
+@pytest.mark.parametrize(
+    "auth_type", [pytest.param("md5", marks=pytest.mark.md5), "scram-sha-256"]
+)
+def test_auth_file_source_changes_existing_pool(bouncer, pg, auth_type):
+    if auth_type == "scram-sha-256" and not PG_SUPPORTS_SCRAM:
+        pytest.skip("PostgreSQL does not support SCRAM")
+    username = "puser1" if auth_type == "md5" else "scramuser1"
+    database = "p5" if auth_type == "md5" else "p6"
+    bouncer.ini_path.write_text(
+        bouncer.ini_path.read_text().replace(
+            "[databases]",
+            f"[databases]\nreload_db = host={pg.host} port={pg.port} dbname={database}",
+        )
+    )
+    bouncer.write_ini(f"auth_type = {auth_type}\nauth_user = pswcheck")
+    bouncer.admin("reload")
+    auth_file = bouncer.auth_path.read_text()
+    original_password = pg.sql_value(
+        "SELECT passwd FROM pg_shadow WHERE usename = %s", (username,)
+    )
+    params = {"dbname": "reload_db", "user": username}
+    try:
+        bouncer.test(**params, password="foo")
+        pg.sql(
+            f"SET password_encryption = '{auth_type}'; ALTER ROLE {username} PASSWORD 'changed'"
+        )
+        bouncer.auth_path.write_text(
+            "\n".join(
+                line
+                for line in auth_file.splitlines()
+                if not line.startswith(f'"{username}" ')
+            )
+            + "\n"
+        )
+        for _ in range(2):
+            bouncer.admin("reload")
+            bouncer.admin("reconnect reload_db")
+            bouncer.admin("wait_close reload_db")
+            bouncer.test(**params, password="changed")
+
+        pg.sql(f"ALTER ROLE {username} PASSWORD '{original_password}'")
+        bouncer.auth_path.write_text(auth_file)
+        bouncer.admin("reload")
+        bouncer.admin("reconnect reload_db")
+        bouncer.admin("wait_close reload_db")
+        bouncer.test(**params, password="foo")
+    finally:
+        pg.sql(f"ALTER ROLE {username} PASSWORD '{original_password}'")
+
+
+@pytest.mark.skipif("not PG_SUPPORTS_SCRAM")
+def test_auth_file_reload_scram_passthrough(bouncer):
+    bouncer.write_ini("auth_type = scram-sha-256\npool_mode = transaction")
+    bouncer.admin("reload")
+    with bouncer.conn(dbname="p62", user="scramuser1", password="foo") as conn:
+        conn.autocommit = True
+        conn.execute("SELECT 1")
+        bouncer.admin("reload")
+        bouncer.admin("reconnect p62")
+        bouncer.admin("wait_close p62")
+        conn.execute("SELECT 1")
+
+        auth_file = bouncer.auth_path.read_text()
+        bouncer.auth_path.write_text(
+            "\n".join(
+                line
+                for line in auth_file.splitlines()
+                if not line.startswith('"scramuser1" ')
+            )
+            + "\n"
+        )
+        bouncer.admin("reload")
+        bouncer.admin("reconnect p62")
+        bouncer.admin("wait_close p62")
+        with pytest.raises(
+            psycopg.OperationalError,
+            match='password authentication failed for user "scramuser1"',
+        ):
+            conn.execute("SELECT 1")
+
+
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
 def test_auth_query_logs_server_error(
     bouncer,
