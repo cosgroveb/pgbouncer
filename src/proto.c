@@ -550,6 +550,13 @@ static bool login_scram_sha_256(PgSocket *server)
 			kill_pool_logins(server->pool, NULL, "server login failed: wrong password type");
 			return false;
 		}
+		server->scram_state.passthrough = true;
+		memcpy(server->scram_state.passthrough_ClientKey,
+		       credentials->scram_ClientKey,
+		       sizeof(server->scram_state.passthrough_ClientKey));
+		memcpy(server->scram_state.passthrough_ServerKey,
+		       credentials->scram_ServerKey,
+		       sizeof(server->scram_state.passthrough_ServerKey));
 		break;
 	default:
 		slog_error(server, "cannot do SCRAM authentication: wrong password type");
@@ -623,7 +630,6 @@ failed:
 
 static bool login_scram_sha_256_final(PgSocket *server, unsigned datalen, const uint8_t *data)
 {
-	PgCredentials *credentials = get_srv_psw(server);
 	char *ibuf = NULL;
 	char *input;
 	char ServerSignature[PG_SHA256_DIGEST_LENGTH];
@@ -645,7 +651,7 @@ static bool login_scram_sha_256_final(PgSocket *server, unsigned datalen, const 
 	if (!read_server_final_message(server, input, ServerSignature))
 		goto failed;
 
-	if (!verify_server_signature(server, credentials, ServerSignature, &match)) {
+	if (!verify_server_signature(server, ServerSignature, &match)) {
 		kill_pool_logins(server->pool, NULL, "server login failed: failed to verify server signature");
 		goto failed;
 	}

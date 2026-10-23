@@ -3,6 +3,7 @@ import getpass
 import re
 import subprocess
 import time
+from contextlib import asynccontextmanager
 
 import psycopg
 import pytest
@@ -746,7 +747,7 @@ def test_auth_query_works_with_configured_users(bouncer):
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
-def test_auth_query_after_user_removed_from_auth_file(bouncer):
+def test_auth_query_after_user_removed_from_auth_file(bouncer, pg):
     """
     When a user is removed from the auth_file and PgBouncer is reloaded, the
     in-memory user object used to linger with an empty password. Because the
@@ -772,20 +773,169 @@ def test_auth_query_after_user_removed_from_auth_file(bouncer):
     """
 
     with bouncer.run_with_config(config):
-        # puser1 is present in the auth_file (password "foo"), so it
+        # puser2 is present in the auth_file (password "bar"), so it
         # authenticates directly from the file without an auth_query.
-        bouncer.test(user="puser1", password="foo", dbname="postgres")
+        bouncer.test(user="puser2", password="bar", dbname="postgres")
 
-        # Remove puser1 from the auth_file, but keep pswcheck so that the
+        # Remove puser2 from the auth_file, but keep pswcheck so that the
         # auth_query connection can still authenticate, then reload.
         with bouncer.auth_path.open("w") as f:
             f.write('"pswcheck" "pgbouncer-check"\n')
         bouncer.admin("RELOAD")
+        pg.nossl_access("postgres", "md5", user="puser2")
+        pg.reload()
+        bouncer.admin("RECONNECT postgres")
+        bouncer.admin("WAIT_CLOSE postgres")
 
-        # puser1 is no longer in the auth_file. It must now be resolved via
+        # puser2 is no longer in the auth_file. It must now be resolved via
         # auth_query instead of failing with an empty stored secret. This
         # raises if authentication fails (which it did before the fix).
-        bouncer.test(user="puser1", password="foo", dbname="postgres")
+        bouncer.test(user="puser2", password="wrong", dbname="postgres")
+
+
+@asynccontextmanager
+async def pause_server_scram(pg, auth_code):
+    enabled = asyncio.Event()
+    paused = asyncio.Event()
+    resume = asyncio.Event()
+    connections = []
+
+    async def proxy(reader, writer):
+        connections.append(asyncio.current_task())
+        backend_reader, backend_writer = await asyncio.open_connection(pg.host, pg.port)
+
+        async def upstream():
+            while data := await reader.read(8192):
+                backend_writer.write(data)
+                await backend_writer.drain()
+
+        forwarding = asyncio.create_task(upstream())
+        try:
+            while True:
+                try:
+                    header = await backend_reader.readexactly(5)
+                except asyncio.IncompleteReadError as error:
+                    if error.partial:
+                        raise
+                    break
+                payload = await backend_reader.readexactly(
+                    int.from_bytes(header[1:], "big") - 4
+                )
+                if (
+                    enabled.is_set()
+                    and header[:1] == b"R"
+                    and int.from_bytes(payload[:4], "big") == auth_code
+                ):
+                    paused.set()
+                    await resume.wait()
+                writer.write(header + payload)
+                await writer.drain()
+        finally:
+            forwarding.cancel()
+            await asyncio.gather(forwarding, return_exceptions=True)
+            backend_writer.close()
+            writer.close()
+            await asyncio.gather(
+                backend_writer.wait_closed(),
+                writer.wait_closed(),
+                return_exceptions=True,
+            )
+
+    server = await asyncio.start_server(proxy, "127.0.0.1", 0)
+    try:
+        yield server.sockets[0].getsockname()[1], enabled, paused, resume
+    finally:
+        resume.set()
+        server.close()
+        for task in connections:
+            task.cancel()
+        await asyncio.gather(*connections, return_exceptions=True)
+        await server.wait_closed()
+
+
+@pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
+@pytest.mark.skipif("not PG_SUPPORTS_SCRAM")
+@pytest.mark.parametrize(
+    "auth_code", [pytest.param(11, id="continue"), pytest.param(12, id="final")]
+)
+async def test_auth_file_reload_during_server_scram(bouncer, pg, auth_code):
+    async with pause_server_scram(pg, auth_code) as (port, enabled, paused, resume):
+        verifier = pg.sql_value(
+            "SELECT passwd FROM pg_shadow WHERE usename = 'scramuser3'"
+        )
+        auth_file = bouncer.auth_path.read_text().replace(
+            '"scramuser3" "baz"', f'"scramuser3" "{verifier}"'
+        )
+        bouncer.auth_path.write_text(auth_file)
+        bouncer.write_ini("auth_type = scram-sha-256")
+        bouncer.write_ini("auth_user = pswcheck")
+        bouncer.write_ini(
+            "auth_query = SELECT usename, passwd FROM pg_shadow where usename = $1"
+        )
+        bouncer.write_ini("server_tls_sslmode = disable")
+        bouncer.write_ini(f"""
+            [databases]
+            handshake = host=127.0.0.1 port={port} dbname=p6 auth_dbname=authdb pool_size=1
+        """)
+        bouncer.admin("reload")
+        pg.nossl_access("p6", "scram-sha-256", user="scramuser3")
+        pg.reload()
+
+        assert await bouncer.asql(
+            "SELECT current_user",
+            dbname="handshake",
+            user="scramuser3",
+            password="baz",
+        ) == [("scramuser3",)]
+
+        enabled.set()
+        bouncer.admin("reconnect handshake")
+        pending = bouncer.asql(
+            "SELECT current_user",
+            dbname="handshake",
+            user="scramuser3",
+            password="baz",
+            connect_timeout=10,
+        )
+        replacement = None
+        try:
+            await asyncio.wait_for(paused.wait(), 5)
+            bouncer.auth_path.write_text(
+                auth_file.replace(f'"scramuser3" "{verifier}"\n', "")
+            )
+            bouncer.admin("reload")
+
+            replacement = bouncer.asql(
+                "SELECT current_user",
+                dbname="handshake",
+                user="scramuser3",
+                password="baz",
+                connect_timeout=10,
+            )
+            for _ in range(50):
+                clients = bouncer.admin(
+                    "SHOW CLIENTS", row_factory=psycopg.rows.dict_row
+                )
+                waiting = sum(
+                    client["database"] == "handshake"
+                    and client["user"] == "scramuser3"
+                    and client["state"] == "waiting"
+                    for client in clients
+                )
+                if waiting == 2:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                pytest.fail("replacement client did not finish authentication")
+
+            resume.set()
+            assert await asyncio.wait_for(pending, 5) == [("scramuser3",)]
+            assert await asyncio.wait_for(replacement, 5) == [("scramuser3",)]
+        finally:
+            tasks = [pending] + ([replacement] if replacement else [])
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")

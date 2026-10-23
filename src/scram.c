@@ -491,8 +491,8 @@ static bool calculate_client_proof(PgSocket *server,
 		goto failed;
 	}
 
-	if (credentials->scram_passthrough_valid) {
-		memcpy(ClientKey, credentials->scram_ClientKey, SCRAM_SHA_256_KEY_LEN);
+	if (state->passthrough) {
+		memcpy(ClientKey, state->passthrough_ClientKey, SCRAM_SHA_256_KEY_LEN);
 	} else
 	{
 		rc = pg_saslprep(credentials->passwd, &prep_password);
@@ -555,7 +555,7 @@ failed:
 	return false;
 }
 
-bool verify_server_signature(PgSocket *server, const PgCredentials *credentials, const char *ServerSignature, bool *match)
+bool verify_server_signature(PgSocket *server, const char *ServerSignature, bool *match)
 {
 	ScramState *state = &server->scram_state;
 	uint8 expected_ServerSignature[SCRAM_MAX_KEY_LEN];
@@ -570,8 +570,8 @@ bool verify_server_signature(PgSocket *server, const PgCredentials *credentials,
 		return false;
 	}
 
-	if (credentials->scram_passthrough_valid) {
-		memcpy(ServerKey, credentials->scram_ServerKey, SCRAM_SHA_256_KEY_LEN);
+	if (state->passthrough) {
+		memcpy(ServerKey, state->passthrough_ServerKey, SCRAM_SHA_256_KEY_LEN);
 	} else
 	{
 		if (scram_ServerKey(state->SaltedPassword, state->hash_type,

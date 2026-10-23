@@ -781,6 +781,9 @@ struct PgSocket {
 		uint8_t *salt;	/* binary salt */
 		int saltlen;	/* length of salt */
 		uint8_t *SaltedPassword;
+		bool passthrough;
+		uint8_t passthrough_ClientKey[32];
+		uint8_t passthrough_ServerKey[32];
 
 		/* Server-side fields (when clients connect to PgBouncer) */
 		char cbind_flag;

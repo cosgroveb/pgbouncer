@@ -351,6 +351,9 @@ static bool finish_set_pool(PgSocket *client)
 			disconnect_client(client, true, "no memory for pool");
 			return false;
 		}
+		/* Existing pools can outlive auth_file/auth_query transitions. */
+		if (!client->db->forced_user_credentials)
+			client->pool->user_credentials = pool_user_credentials;
 	}
 
 	if (cf_log_connections) {
