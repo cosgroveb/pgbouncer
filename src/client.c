@@ -352,8 +352,7 @@ static bool finish_set_pool(PgSocket *client)
 			return false;
 		}
 		/* Existing pools can outlive auth_file/auth_query transitions. */
-		if (!client->db->forced_user_credentials)
-			client->pool->user_credentials = pool_user_credentials;
+		client->pool->user_credentials = pool_user_credentials;
 	}
 
 	if (cf_log_connections) {

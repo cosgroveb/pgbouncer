@@ -938,6 +938,46 @@ async def test_auth_file_reload_during_server_scram(bouncer, pg, auth_code):
             await asyncio.gather(*tasks, return_exceptions=True)
 
 
+@pytest.mark.md5
+def test_auth_query_pool_uses_forced_user_credentials(bouncer, pg):
+    bouncer.write_ini("auth_type = md5")
+    bouncer.write_ini(
+        "auth_query = SELECT usename, passwd FROM pg_shadow where usename = $1"
+    )
+    bouncer.write_ini(f"""
+        [databases]
+        forced = host={pg.host} port={pg.port} dbname=p0 user=pswcheck password=pgbouncer-check auth_user=pswcheck
+    """)
+    auth_file = bouncer.auth_path.read_text().replace('"puser2" "bar"\n', "")
+    bouncer.auth_path.write_text(auth_file)
+    bouncer.admin("reload")
+    pg.nossl_access("p0", "md5", user="pswcheck")
+    pg.reload()
+
+    # The auth query creates the pool with auth-user credentials first.
+    assert (
+        bouncer.sql_value(
+            "SELECT current_user", dbname="forced", user="puser2", password="wrong"
+        )
+        == "pswcheck"
+    )
+
+    bouncer.auth_path.write_text(
+        auth_file.replace('"pswcheck" "pgbouncer-check"', '"pswcheck" "wrong"')
+    )
+    bouncer.admin("reload")
+    bouncer.admin("reconnect forced")
+    bouncer.admin("wait_close forced")
+
+    # A new backend must still use the configured forced-user password.
+    assert (
+        bouncer.sql_value(
+            "SELECT current_user", dbname="forced", user="puser2", password="wrong"
+        )
+        == "pswcheck"
+    )
+
+
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
 def test_auth_query_logs_server_error(
     bouncer,
