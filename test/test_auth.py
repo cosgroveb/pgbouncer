@@ -746,7 +746,7 @@ def test_auth_query_works_with_configured_users(bouncer):
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
-def test_auth_query_after_user_removed_from_auth_file(bouncer):
+def test_auth_query_after_user_removed_from_auth_file(bouncer, pg):
     """
     When a user is removed from the auth_file and PgBouncer is reloaded, the
     in-memory user object used to linger with an empty password. Because the
@@ -772,20 +772,24 @@ def test_auth_query_after_user_removed_from_auth_file(bouncer):
     """
 
     with bouncer.run_with_config(config):
-        # puser1 is present in the auth_file (password "foo"), so it
+        # puser2 is present in the auth_file (password "bar"), so it
         # authenticates directly from the file without an auth_query.
-        bouncer.test(user="puser1", password="foo", dbname="postgres")
+        bouncer.test(user="puser2", password="bar", dbname="postgres")
 
-        # Remove puser1 from the auth_file, but keep pswcheck so that the
+        # Remove puser2 from the auth_file, but keep pswcheck so that the
         # auth_query connection can still authenticate, then reload.
         with bouncer.auth_path.open("w") as f:
             f.write('"pswcheck" "pgbouncer-check"\n')
         bouncer.admin("RELOAD")
 
-        # puser1 is no longer in the auth_file. It must now be resolved via
-        # auth_query instead of failing with an empty stored secret. This
-        # raises if authentication fails (which it did before the fix).
-        bouncer.test(user="puser1", password="foo", dbname="postgres")
+        pg.nossl_access("postgres", "md5", user="puser2")
+        pg.reload()
+        bouncer.admin("RECONNECT postgres")
+        bouncer.admin("WAIT_CLOSE postgres")
+
+        # puser2 is no longer in the auth_file. Both client and server
+        # authentication must use its auth_query password ("wrong").
+        bouncer.test(user="puser2", password="wrong", dbname="postgres")
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
