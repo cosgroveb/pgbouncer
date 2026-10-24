@@ -748,13 +748,21 @@ def test_auth_query_works_with_configured_users(bouncer):
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
 def test_auth_query_after_user_removed_from_auth_file(bouncer, pg):
     """
-    When a user is removed from the auth_file and PgBouncer is reloaded, the
-    in-memory user object used to linger with an empty password. Because the
-    user was still "known", the auth_query code path was skipped and clients
-    received an empty stored secret, so authentication failed until a full
-    restart. After the fix the removed user falls back to auth_query, just
-    like it would after a fresh start.
+    A user removed from the auth_file must use its auth_query credentials for
+    both client and new backend connections in an existing pool.
     """
+
+    user = "auth_query_reload"
+    auth_file_password = "file-password"
+    auth_query_password = "query-password"
+
+    pg.sql(
+        f"SET password_encryption = 'md5'; "
+        f"CREATE USER {user} PASSWORD '{auth_query_password}'"
+    )
+    bouncer.auth_path.write_text(
+        f'"pswcheck" "pgbouncer-check"\n"{user}" "{auth_file_password}"\n'
+    )
 
     config = f"""
         [databases]
@@ -771,25 +779,21 @@ def test_auth_query_after_user_removed_from_auth_file(bouncer, pg):
         auth_dbname = postgres
     """
 
-    with bouncer.run_with_config(config):
-        # puser2 is present in the auth_file (password "bar"), so it
-        # authenticates directly from the file without an auth_query.
-        bouncer.test(user="puser2", password="bar", dbname="postgres")
+    try:
+        with bouncer.run_with_config(config):
+            bouncer.test(user=user, password=auth_file_password, dbname="postgres")
 
-        # Remove puser2 from the auth_file, but keep pswcheck so that the
-        # auth_query connection can still authenticate, then reload.
-        with bouncer.auth_path.open("w") as f:
-            f.write('"pswcheck" "pgbouncer-check"\n')
-        bouncer.admin("RELOAD")
+            bouncer.auth_path.write_text('"pswcheck" "pgbouncer-check"\n')
+            bouncer.admin("RELOAD")
 
-        pg.nossl_access("postgres", "md5", user="puser2")
-        pg.reload()
-        bouncer.admin("RECONNECT postgres")
-        bouncer.admin("WAIT_CLOSE postgres")
+            pg.nossl_access("postgres", "md5", user=user)
+            pg.reload()
+            bouncer.admin("RECONNECT postgres")
+            bouncer.admin("WAIT_CLOSE postgres")
 
-        # puser2 is no longer in the auth_file. Both client and server
-        # authentication must use its auth_query password ("wrong").
-        bouncer.test(user="puser2", password="wrong", dbname="postgres")
+            bouncer.test(user=user, password=auth_query_password, dbname="postgres")
+    finally:
+        pg.sql(f"DROP USER {user}")
 
 
 @pytest.mark.skipif("WINDOWS", reason="Windows does not have SIGHUP")
