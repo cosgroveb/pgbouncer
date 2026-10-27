@@ -717,6 +717,7 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 	struct List *item, *tmp;
 	PgPool *pool;
 	PgDatabase *db;
+	PgSocket *client;
 
 	static unsigned int seq;
 	seq++;
@@ -758,6 +759,14 @@ static void do_full_maint(evutil_socket_t sock, short flags, void *arg)
 		pool = container_of(item, PgPool, head);
 		peer_pool_server_maint(pool);
 		peer_pool_client_maint(pool);
+	}
+
+	/* Login clients are not included in pool_client_count(). */
+	statlist_for_each(item, &login_client_list) {
+		client = container_of(item, PgSocket, head);
+		db = client->db;
+		if (db && db->db_auto && db->inactive_time == 0)
+			db->active_stamp = seq;
 	}
 
 	/* find inactive autodbs */

@@ -7,6 +7,7 @@ import time
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from .utils import (
     HAVE_IPV6_LOCALHOST,
@@ -633,6 +634,54 @@ def test_second_startup_message_rejected(bouncer, database):
                 message_type, message = _read_message(stream)
             assert message_type == b"E"
             assert b"client re-sent startup pkt" in message
+
+
+def test_auto_database_kept_during_password_authentication(bouncer):
+    bouncer.write_ini(
+        "[databases]\n"
+        f"* = port={bouncer.pg.port} host=127.0.0.1 dbname=p0\n"
+        "[pgbouncer]\n"
+        "auth_type = plain\n"
+        "autodb_idle_timeout = 1\n"
+        "client_login_timeout = 10"
+    )
+    bouncer.admin("reload")
+
+    with socket.create_connection((bouncer.host, bouncer.port), timeout=5) as sock:
+        sock.sendall(_startup_packet(b"puser1", b"autodb"))
+        with sock.makefile("rb") as stream:
+            assert _read_message(stream) == (b"R", struct.pack("!I", 3))
+
+            time.sleep(2)
+            password = b"foo\0"
+            sock.sendall(b"p" + struct.pack("!I", len(password) + 4) + password)
+            assert stream.peek(1), (
+                "PgBouncer closed the connection during authentication"
+            )
+            while True:
+                message_type, message = _read_message(stream)
+                assert message_type != b"E", message
+                if message_type == b"Z":
+                    break
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="SHOW CLIENTS omits clients awaiting passwords",
+)
+def test_show_clients_during_password_authentication(bouncer):
+    bouncer.admin("set auth_type = plain")
+
+    with socket.create_connection((bouncer.host, bouncer.port), timeout=5) as sock:
+        sock.sendall(_startup_packet(b"puser1", b"p0"))
+        with sock.makefile("rb") as stream:
+            assert _read_message(stream) == (b"R", struct.pack("!I", 3))
+            clients = bouncer.admin("SHOW CLIENTS", row_factory=dict_row)
+            assert any(
+                client["user"] == "puser1" and client["database"] == "p0"
+                for client in clients
+            )
 
 
 def test_protocol_extension_negotiation(bouncer):
