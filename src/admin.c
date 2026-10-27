@@ -566,6 +566,7 @@ static bool admin_show_clients(PgSocket *admin, const char *arg)
 		show_socket_list(buf, &pool->active_cancel_req_list, "active_cancel_req", false);
 		show_socket_list(buf, &pool->waiting_cancel_req_list, "waiting_cancel_req", false);
 	}
+	show_socket_list(buf, &login_client_list, "login", false);
 
 	admin_flush(admin, buf, "SHOW");
 	return true;

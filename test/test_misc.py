@@ -665,11 +665,6 @@ def test_auto_database_kept_during_password_authentication(bouncer):
                     break
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="SHOW CLIENTS omits clients awaiting passwords",
-)
 def test_show_clients_during_password_authentication(bouncer):
     bouncer.admin("set auth_type = plain")
 
