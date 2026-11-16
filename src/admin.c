@@ -1760,12 +1760,30 @@ void admin_wait_close_done(void)
 /* admin on console has pressed ^C */
 void admin_handle_cancel(PgSocket *admin)
 {
-	/* weird, but no reason to fail */
-	if (admin->admin_wait == ADMIN_WAIT_NONE)
+	char target[MAX_DBNAME];
+	PgDatabase *db;
+
+	switch (admin->admin_wait) {
+	case ADMIN_WAIT_NONE:
+		/* weird, but no reason to fail */
 		slog_warning(admin, "admin cancel request for non-waiting client?");
-
-	if (cf_shutdown)
 		return;
-
-	cf_pause_mode = P_NONE;
+	case ADMIN_WAIT_PAUSE:
+		if (cf_shutdown)
+			return;
+		/* undo this PAUSE as RESUME would; admin may be freed below */
+		strlcpy(target, admin->pause_target, sizeof(target));
+		if (target[0]) {
+			db = find_database(target);
+			if (db)
+				db->db_paused = false;
+		} else {
+			cf_pause_mode = P_NONE;
+		}
+		admin_pause_cancel(target);
+		return;
+	case ADMIN_WAIT_CLOSE:
+		/* reply with error, disconnect client if send fails, set admin_wait to none? */
+		return;
+	}
 }
